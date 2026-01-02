@@ -20,7 +20,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # Install other dependencies
 echo "[3/3] Installing dependencies..."
-pip install numpy scipy matplotlib scikit-learn
+pip install numpy scipy matplotlib scikit-learn jupyter ipywidgets
 
 # Verify CUDA
 echo ""
