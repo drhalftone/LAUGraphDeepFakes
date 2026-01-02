@@ -1,0 +1,18 @@
+# Virtual environments
+gdf_env/
+gdf_gpu/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Training outputs (large files)
+training_output/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
