@@ -251,13 +251,12 @@ print("\n[PHASE 3] Building Latent Diffusion Model...")
 class GraphAwareDiffusion(nn.Module):
     """
     Graph-Aware Diffusion (GAD) model based on arXiv:2510.05036.
+    Aligned with official implementation: https://github.com/vimalkb7/gad
 
-    Key innovations over standard DDPM:
-    1. Forward process uses graph Laplacian for structured noise injection
-    2. Floor Constrained Polynomial Scheduler (FCPS) prevents eigenmode decay
-    3. Denoiser uses rational graph filter structure (implemented via spectral GCNN)
-
-    Forward SDE: dx_t = -c_t * L * x_t * dt + sqrt(2*c_t) * sigma * dw_t
+    Key components:
+    1. GASDE: Forward SDE with Laplacian drift: dx = -c(t)*L*x*dt + √(2c(t))*dw
+    2. Floor Constrained Polynomial Scheduler (FCPS)
+    3. Polynomial Graph Filter denoiser (powers of adjacency S^k)
     """
     def __init__(self, latent_dim, hidden_dim, n_steps, n_eigenvectors):
         super().__init__()
@@ -265,55 +264,63 @@ class GraphAwareDiffusion(nn.Module):
         self.n_steps = n_steps
         self.n_eig = n_eigenvectors
 
-        # Learnable "latent graph" eigenvalues for structured diffusion
-        # This allows the model to learn graph-like structure in latent space
-        self.register_buffer('latent_eigenvalues',
-            torch.linspace(0, 1, latent_dim) ** 2)  # Quadratic spacing like Laplacian
+        # Learnable "latent graph" structure
+        # Eigenvalues for the latent space (like Laplacian spectrum)
+        eigenvalues = torch.linspace(0, 2, latent_dim) ** 2
+        self.register_buffer('eigenvalues', eigenvalues)
 
-        # Floor Constrained Polynomial Scheduler (FCPS)
-        # Prevents exponential decay of eigenmodes
-        self._setup_fcps_schedule(n_steps)
+        # Setup GASDE schedule: c(t) = c_min + k * u^alpha
+        self._setup_gasde_schedule(n_steps)
 
-        # Time embedding with sinusoidal positional encoding (more expressive)
-        self.time_embed = nn.Sequential(
-            SinusoidalPositionalEmbedding(hidden_dim),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
+        # Graph filter denoiser (polynomial filter like official GAD)
+        self.denoiser = PolynomialGraphFilterDenoiser(latent_dim, hidden_dim)
 
-        # Graph-aware denoiser: rational graph filter structure
-        # Inspired by GAD's Proposition 1: optimal denoiser is a rational filter
-        self.denoiser = RationalGraphFilterDenoiser(latent_dim, hidden_dim)
-
-    def _setup_fcps_schedule(self, n_steps):
+    def _setup_gasde_schedule(self, n_steps):
         """
-        Floor Constrained Polynomial Scheduler (FCPS) from GAD paper.
-        Ensures eigenmode coefficients don't decay below a floor value.
+        GASDE schedule from official GAD code.
+        c(t) = c_min + k * (t/T)^alpha
 
-        Standard schedule: alpha_t = 1 - beta_t (exponential decay)
-        FCPS: Uses polynomial decay with floor constraint
+        The integral s(t) = ∫c(τ)dτ controls eigenmode decay.
         """
-        # Time grid
+        # Schedule parameters (from GAD paper/code)
+        c_min = 0.1
+        alpha = 2.0  # Polynomial order
+        k = 2.0      # Scale factor
+
+        # Time grid [0, 1]
         t = torch.linspace(0, 1, n_steps)
 
-        # Polynomial schedule with floor (GAD Eq. 15-like)
-        # c(t) controls the drift coefficient in the SDE
-        poly_order = 2
-        floor = 0.1  # Minimum signal retention
+        # c(t) schedule
+        c_t = c_min + k * (t ** alpha)
+        self.register_buffer('c_t', c_t)
 
-        # Cumulative signal retention (like alpha_cumprod but with floor)
-        signal_retention = floor + (1 - floor) * (1 - t ** poly_order)
+        # Integral s(t) = ∫_0^t c(τ)dτ for marginal distribution
+        # s(t) = c_min*t + k*t^(alpha+1)/(alpha+1)
+        s_t = c_min * t + k * (t ** (alpha + 1)) / (alpha + 1)
+        self.register_buffer('s_t', s_t)
 
-        # Convert to standard diffusion notation
-        alphas_cumprod = signal_retention
-        alphas_cumprod = torch.clamp(alphas_cumprod, min=1e-6, max=1.0)
+        # Eigenmode decay factors: exp(-s(t) * λ_i)
+        # Shape: (n_steps, latent_dim)
+        decay = torch.exp(-s_t.unsqueeze(-1) * self.eigenvalues.unsqueeze(0))
+        self.register_buffer('decay', decay)
 
-        # Derive betas from alphas_cumprod
+        # Marginal variance: (1 - exp(-2*s(t)*λ)) / (2*λ) for each eigenmode
+        # For numerical stability, use Taylor expansion for small λ
+        eigenvalues_safe = self.eigenvalues.clamp(min=1e-6)
+        marginal_var = (1 - torch.exp(-2 * s_t.unsqueeze(-1) * eigenvalues_safe.unsqueeze(0))) / (2 * eigenvalues_safe.unsqueeze(0))
+        marginal_var = marginal_var.clamp(min=1e-8)
+        self.register_buffer('marginal_std', torch.sqrt(marginal_var))
+
+        # For DDPM-style training, also compute equivalent alphas
+        # alpha_cumprod ≈ decay^2 (signal retention)
+        alphas_cumprod = (decay ** 2).mean(dim=-1)  # Average over eigenmodes
+        alphas_cumprod = alphas_cumprod.clamp(min=1e-6, max=1.0)
+
         alphas_cumprod_prev = torch.cat([torch.ones(1), alphas_cumprod[:-1]])
         alphas = alphas_cumprod / alphas_cumprod_prev
+        alphas = alphas.clamp(min=1e-6, max=1.0)
         betas = 1 - alphas
-        betas = torch.clamp(betas, min=1e-6, max=0.999)
+        betas = betas.clamp(min=1e-6, max=0.999)
 
         self.register_buffer('betas', betas)
         self.register_buffer('alphas', alphas)
@@ -321,66 +328,77 @@ class GraphAwareDiffusion(nn.Module):
         self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
         self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1.0 - alphas_cumprod))
 
-        # Graph-aware noise scaling per eigenmode
-        # Higher eigenvalues (high freq) get more noise faster
-        eigenvalue_scaling = 1.0 + 0.5 * self.latent_eigenvalues.unsqueeze(0)
-        self.register_buffer('eigenvalue_scaling', eigenvalue_scaling)
-
     def forward(self, z_noisy, t):
-        """Predict noise from noisy latent and timestep using graph-aware denoiser."""
-        t_embed = self.time_embed(t)
-        noise_pred = self.denoiser(z_noisy, t_embed)
+        """Predict noise using polynomial graph filter denoiser."""
+        noise_pred = self.denoiser(z_noisy, t, self.n_steps)
         return noise_pred
 
     def add_noise(self, z, t, noise=None):
         """
-        Graph-aware forward process.
-        Higher eigenvalue components (high frequency) receive more noise.
+        GASDE forward process in eigenspace.
+        q(z_t | z_0) = N(decay(t) * z_0, marginal_var(t))
         """
         if noise is None:
             noise = torch.randn_like(z)
 
-        sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(-1)
-        sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(-1)
+        # Get decay and std for this timestep
+        decay_t = self.decay[t]  # (batch, latent_dim)
+        std_t = self.marginal_std[t]  # (batch, latent_dim)
 
-        # Standard diffusion (can be extended with eigenvalue-dependent scaling)
-        z_noisy = sqrt_alpha * z + sqrt_one_minus_alpha * noise
+        # Forward process: z_t = decay * z_0 + std * noise
+        z_noisy = decay_t * z + std_t * noise
 
         return z_noisy, noise
 
     @torch.no_grad()
     def sample(self, n_samples, device):
-        """Generate samples via reverse diffusion with DDPM sampling."""
-        # Start from noise
+        """
+        Reverse diffusion using Euler-Maruyama integration.
+        Following official GAD implementation.
+        """
+        # Start from noise (stationary distribution)
         z = torch.randn(n_samples, self.latent_dim, device=device)
+
+        # Time step size
+        dt = 1.0 / self.n_steps
 
         # Reverse diffusion
         for t in reversed(range(self.n_steps)):
             t_batch = torch.full((n_samples,), t, device=device, dtype=torch.long)
 
-            # Predict noise using graph-aware denoiser
+            # Current c(t) and eigenvalues
+            c = self.c_t[t]
+
+            # Score prediction (noise_pred ≈ -std * score)
             noise_pred = self.forward(z, t_batch)
 
-            # DDPM update
-            alpha = self.alphas[t]
-            beta = self.betas[t]
-
+            # Reverse SDE drift: drift = c(t) * L * z + 2 * c(t) * score
+            # In eigenspace: drift_i = c(t) * λ_i * z_i + 2 * c(t) * score_i
+            # Since noise_pred ≈ -std * score, score ≈ -noise_pred / std
             if t > 0:
-                noise = torch.randn_like(z)
-                sigma = torch.sqrt(beta)
-            else:
-                noise = 0
-                sigma = 0
+                std_t = self.marginal_std[t].unsqueeze(0)
+                score_estimate = -noise_pred / (std_t + 1e-6)
 
-            # Denoise step
-            z = (1 / torch.sqrt(alpha)) * (z - (beta / self.sqrt_one_minus_alphas_cumprod[t]) * noise_pred)
-            z = z + sigma * noise
+                # Drift in eigenspace
+                drift = c * self.eigenvalues.unsqueeze(0) * z + 2 * c * score_estimate
+
+                # Diffusion coefficient
+                diffusion = torch.sqrt(2 * c)
+
+                # Euler-Maruyama step (reverse time, so subtract)
+                noise = torch.randn_like(z)
+                z = z - drift * dt + diffusion * np.sqrt(dt) * noise
+            else:
+                # Final step: just denoise
+                std_t = self.marginal_std[t].unsqueeze(0)
+                score_estimate = -noise_pred / (std_t + 1e-6)
+                z = z + 2 * c * score_estimate * dt
 
         return z
 
 
 class SinusoidalPositionalEmbedding(nn.Module):
-    """Sinusoidal time embeddings as in Transformers/DDPM."""
+    """Sinusoidal time embeddings as in official GAD TimeEmbedding."""
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
@@ -395,94 +413,138 @@ class SinusoidalPositionalEmbedding(nn.Module):
         return emb
 
 
-class RationalGraphFilterDenoiser(nn.Module):
+class GraphFilterTap(nn.Module):
     """
-    Denoiser inspired by GAD's Proposition 1:
-    Optimal denoiser has rational frequency response H(λ) = P(λ)/Q(λ)
+    Polynomial graph filter layer from official GAD.
+    Computes: h(S) = Σ θ_k S^k
 
-    Implemented as learnable polynomial filters on the latent "graph".
+    For latent space, S is a learnable adjacency-like matrix.
     """
-    def __init__(self, latent_dim, hidden_dim, filter_order=4):
+    def __init__(self, in_channels, out_channels, filter_order=4):
         super().__init__()
-        self.latent_dim = latent_dim
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         self.filter_order = filter_order
 
-        # Input projection
-        self.input_proj = nn.Linear(latent_dim, hidden_dim)
+        # Filter coefficients θ_k for each input-output channel pair
+        self.theta = nn.Parameter(torch.randn(filter_order + 1, in_channels, out_channels) * 0.01)
 
-        # Time-conditioned filter coefficients
-        # Numerator polynomial P(λ)
-        self.P_net = nn.Sequential(
+        # Layer norm
+        self.norm = nn.LayerNorm(out_channels)
+
+    def forward(self, x, S_powers):
+        """
+        x: (batch, latent_dim, in_channels)
+        S_powers: list of (latent_dim, latent_dim) matrices [S^0, S^1, ..., S^K]
+        """
+        batch_size = x.shape[0]
+
+        # Apply polynomial filter: Σ_k θ_k (S^k @ x)
+        out = torch.zeros(batch_size, x.shape[1], self.out_channels, device=x.device)
+
+        for k in range(self.filter_order + 1):
+            # S^k @ x for each sample in batch
+            Sk_x = torch.matmul(S_powers[k].unsqueeze(0), x)  # (batch, latent_dim, in_channels)
+            # Apply coefficients
+            out = out + torch.einsum('bni,ioj->bno', Sk_x, self.theta[k:k+1].squeeze(0))
+
+        return self.norm(F.silu(out))
+
+
+class PolynomialGraphFilterDenoiser(nn.Module):
+    """
+    Denoiser using polynomial graph filters as in official GAD.
+    Uses powers of a learnable adjacency matrix S.
+    """
+    def __init__(self, latent_dim, hidden_dim, filter_order=4, n_layers=3):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        self.filter_order = filter_order
+
+        # Time embedding
+        self.time_embed = nn.Sequential(
+            SinusoidalPositionalEmbedding(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, filter_order + 1)
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
         )
 
-        # Denominator polynomial Q(λ)
-        self.Q_net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, filter_order + 1)
-        )
+        # Learnable adjacency matrix for latent space
+        # Initialize as tridiagonal (local connectivity)
+        S_init = torch.zeros(latent_dim, latent_dim)
+        for i in range(latent_dim - 1):
+            S_init[i, i+1] = 0.5
+            S_init[i+1, i] = 0.5
+        S_init = S_init + 0.1 * torch.eye(latent_dim)  # Self-loops
+        self.S = nn.Parameter(S_init)
 
-        # Residual MLP for non-polynomial components
-        self.residual_mlp = nn.Sequential(
-            nn.Linear(latent_dim + hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, latent_dim)
-        )
+        # Input projection: (latent_dim) -> (latent_dim, hidden_channels)
+        hidden_channels = 32
+        self.input_proj = nn.Linear(1 + hidden_dim // latent_dim + 1, hidden_channels)
+
+        # Graph filter layers
+        self.layers = nn.ModuleList([
+            GraphFilterTap(hidden_channels if i > 0 else hidden_channels,
+                          hidden_channels, filter_order)
+            for i in range(n_layers)
+        ])
 
         # Output projection
-        self.output_proj = nn.Linear(hidden_dim + latent_dim, latent_dim)
+        self.output_proj = nn.Sequential(
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.SiLU(),
+            nn.Linear(hidden_channels, 1)
+        )
 
-        # Learnable eigenvalue basis for latent space
-        self.register_buffer('lambda_basis',
-            torch.linspace(0, 2, latent_dim).unsqueeze(0))  # (1, latent_dim)
+        # Residual connection
+        self.residual_weight = nn.Parameter(torch.tensor(0.1))
 
-    def forward(self, z, t_embed):
+    def _compute_S_powers(self):
+        """Precompute powers of S."""
+        S_powers = [torch.eye(self.latent_dim, device=self.S.device)]
+        S_current = self.S
+        for k in range(self.filter_order):
+            S_powers.append(S_current.clone())
+            S_current = torch.matmul(S_current, self.S)
+        return S_powers
+
+    def forward(self, z, t, n_steps):
         """
-        Apply rational graph filter denoising.
-
         z: (batch, latent_dim) - noisy latent
-        t_embed: (batch, hidden_dim) - time embedding
+        t: (batch,) - timestep indices
         """
         batch_size = z.shape[0]
 
-        # Get time-conditioned filter coefficients
-        P_coef = self.P_net(t_embed)  # (batch, filter_order+1)
-        Q_coef = self.Q_net(t_embed)  # (batch, filter_order+1)
+        # Time embedding
+        t_norm = t.float() / n_steps  # Normalize to [0, 1]
+        t_embed = self.time_embed(t_norm)  # (batch, hidden_dim)
 
-        # Compute rational filter response H(λ) = P(λ)/Q(λ) for each latent dim
-        # λ values are the learnable eigenvalue basis
-        lambda_powers = torch.stack([
-            self.lambda_basis ** k for k in range(self.filter_order + 1)
-        ], dim=-1)  # (1, latent_dim, filter_order+1)
+        # Expand time embedding to each latent dimension
+        t_per_node = t_embed.unsqueeze(1).expand(-1, self.latent_dim, -1)  # (batch, latent_dim, hidden_dim)
+        t_per_node = t_per_node[..., :self.hidden_dim // self.latent_dim + 1]  # Truncate
 
-        # P(λ) and Q(λ)
-        P_lambda = torch.sum(P_coef.unsqueeze(1) * lambda_powers, dim=-1)  # (batch, latent_dim)
-        Q_lambda = torch.sum(Q_coef.unsqueeze(1) * lambda_powers, dim=-1)  # (batch, latent_dim)
+        # Prepare input: concatenate z values with time embedding
+        z_expanded = z.unsqueeze(-1)  # (batch, latent_dim, 1)
+        x = torch.cat([z_expanded, t_per_node], dim=-1)  # (batch, latent_dim, 1 + time_dim)
 
-        # Rational filter: H(λ) = P(λ) / (Q(λ) + eps)
-        H_lambda = P_lambda / (Q_lambda.abs() + 0.1)  # (batch, latent_dim)
+        # Project to hidden channels
+        x = self.input_proj(x)  # (batch, latent_dim, hidden_channels)
 
-        # Apply filter in "spectral" domain (element-wise for latent)
-        z_filtered = z * H_lambda
+        # Compute S powers
+        S_powers = self._compute_S_powers()
 
-        # Residual MLP for additional expressivity
-        z_residual = self.residual_mlp(torch.cat([z, t_embed], dim=-1))
+        # Apply graph filter layers
+        for layer in self.layers:
+            x = layer(x, S_powers) + x  # Residual connection
 
-        # Combine filtered + residual
-        h = self.input_proj(z_filtered)
-        output = self.output_proj(torch.cat([h, z_residual], dim=-1))
+        # Output projection
+        out = self.output_proj(x).squeeze(-1)  # (batch, latent_dim)
 
-        return output
+        # Residual connection to input
+        out = out + self.residual_weight * z
+
+        return out
 
 
 # Alias for backward compatibility
