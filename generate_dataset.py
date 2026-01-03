@@ -1,13 +1,14 @@
 """
 Graph Deep Fakes - Multi-Dataset Generator
 ============================================
-Generates multiple FEA solutions by varying parameters:
-- Peclet number (advection strength)
-- Inlet velocity magnitude
-- Cylinder vertical position
+Generates multiple FEA solutions (steady-state heat equation) by varying:
+- Diffusivity (thermal conductivity k)
+- Source strength (heat source Q)
+
+The cylinder obstacle is fixed at y=0 to match mesh geometry.
 
 Outputs:
-- dataset/mesh.npz: Fixed mesh (nodes, triangles, Laplacian)
+- dataset/mesh.npz: Fixed mesh (nodes, triangles, Laplacian eigenvectors)
 - dataset/solutions.npz: All FEA solutions with parameter labels
 """
 
@@ -122,6 +123,8 @@ def build_cotangent_laplacian(points, triangles):
             e2_3d = np.array([e2[0], e2[1], 0])
             sin_angle = np.abs(np.linalg.norm(np.cross(e1_3d, e2_3d)))
             cot_weight = cos_angle / (sin_angle + 1e-10) * 0.5
+            # Clamp negative weights for numerical stability (not standard cotan,
+            # but prevents issues with obtuse triangles)
             cot_weight = max(cot_weight, 0)
 
             rows.extend([vi, vj])
