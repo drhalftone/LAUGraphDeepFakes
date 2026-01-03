@@ -8,7 +8,7 @@ This project trains a generative model to create "deep fake" FEA fields on a fix
 
 1. **Graph Signal Processing**: Treat the FEA mesh as a graph with the cotangent-weighted Laplacian
 2. **Spectral Graph VAE**: Compress high-dimensional fields (~6500 nodes) to a low-dimensional latent space (~64 dims)
-3. **Latent Diffusion**: Train a DDPM-style diffusion model on the latent space
+3. **Graph-Aware Diffusion (GAD)**: Train a diffusion model with polynomial graph filters on the latent space
 4. **Generation**: Sample new latent codes and decode to synthetic FEA fields
 
 ## Quick Start (GPU)
@@ -33,10 +33,11 @@ python train_model.py
 LAUGraphDeepFakes/
 ├── dataset/                    # Pre-generated training data
 │   ├── mesh.npz               # Node positions, triangles, eigenvectors
-│   ├── solutions.npz          # 245 FEA solutions
+│   ├── solutions.npz          # 49 FEA solutions
 │   ├── laplacian.npz          # Graph Laplacian (sparse)
 │   └── adjacency.npz          # Adjacency weights (sparse)
 ├── train_model.py             # Main training script
+├── train_model.ipynb          # Jupyter notebook (interactive)
 ├── generate_dataset.py        # Dataset generation script
 ├── run_simulation.py          # Single simulation visualization
 ├── setup_gpu.sh               # GPU environment setup
@@ -75,21 +76,28 @@ If you prefer conda:
 ```bash
 conda create -n gdf python=3.11 pytorch torchvision -c pytorch
 conda activate gdf
-pip install numpy scipy matplotlib scikit-learn
+pip install numpy scipy matplotlib scikit-learn jupyter
 ```
 
 ## Usage
 
 ### Train the Model
 
+**Command line:**
 ```bash
 python train_model.py
 ```
 
+**Jupyter notebook:**
+```bash
+jupyter notebook
+# Open train_model.ipynb
+```
+
 This will:
-- Load the pre-generated dataset (245 FEA solutions)
+- Load the pre-generated dataset (49 FEA solutions)
 - Train a Graph VAE (~500 epochs)
-- Train a Latent Diffusion model (~800 epochs)
+- Train a Graph-Aware Diffusion model (~800 epochs)
 - Generate synthetic samples
 - Save visualizations to `training_output/`
 
@@ -106,9 +114,8 @@ python generate_dataset.py
 ```
 
 Configurable parameters in the script:
-- `DIFFUSIVITY_VALUES`: Thermal conductivity range
-- `SOURCE_VALUES`: Heat source strength range
-- `CYLINDER_Y_VALUES`: Cylinder position range
+- `DIFFUSIVITY_VALUES`: Thermal conductivity range (default: 7 values from 0.1 to 10.0)
+- `SOURCE_VALUES`: Heat source strength range (default: 7 values from 0.5 to 7.0)
 - `MESH_RESOLUTION`: Mesh density
 
 ### Run Single Simulation
@@ -130,6 +137,7 @@ After training, `training_output/` contains:
 | `synthetic_samples.png` | Visualization of generated fields |
 | `real_vs_synthetic.png` | Comparison of real vs generated |
 | `training_curves.png` | Loss curves |
+| `fcps_schedule.png` | FCPS vs linear noise schedule |
 | `latent_space.png` | PCA of latent space |
 
 ## Model Architecture
@@ -139,30 +147,32 @@ After training, `training_output/` contains:
 - **Decoder**: Reconstructs fields from latent codes using spectral coefficients
 - **Latent dim**: 64
 
-### Latent Diffusion
-- **Type**: DDPM (Denoising Diffusion Probabilistic Model)
+### Graph-Aware Diffusion (GAD)
+- **Schedule**: Floor Constrained Polynomial Schedule (FCPS)
+- **Denoiser**: Polynomial graph filter H(S) = Σ θ_k S^k
 - **Steps**: 100
 - **Operates on**: 64-dim latent space (not full mesh)
 
+Based on: [arXiv:2510.05036](https://arxiv.org/abs/2510.05036)
+
 ## Dataset Details
 
-The included dataset contains 245 steady-state heat equation solutions:
+The included dataset contains 49 steady-state heat equation solutions:
 
 - **Mesh**: 6,523 nodes, 12,589 triangular elements
-- **Domain**: Rectangular region with circular obstacle (cylinder)
+- **Domain**: Rectangular region with circular obstacle (cylinder at origin)
 - **Parameters varied**:
-  - Diffusivity (k): 0.1 to 10.0
-  - Source strength (Q): 0.5 to 7.0
-  - Cylinder Y position: -0.03 to +0.03
+  - Diffusivity (k): 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0
+  - Source strength (Q): 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0
 
 ## References
 
-This project was inspired by discussions on:
+This project was inspired by:
 - Graph Signal Processing on meshes
 - Spectral mesh processing and manifold harmonics
-- Graph-aware diffusion models for signal generation
+- Graph-Aware Diffusion (GAD) for signal generation ([arXiv:2510.05036](https://arxiv.org/abs/2510.05036))
 
-See the included `.md` files for the original conversation notes.
+See the included `.md` files for conversation notes.
 
 ## License
 
