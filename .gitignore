@@ -16,3 +16,6 @@ training_output/
 
 # Claude
 .claude/
+
+# Jupyter
+.ipynb_checkpoints/
