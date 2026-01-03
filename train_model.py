@@ -556,7 +556,7 @@ n_params_diff = sum(p.numel() for p in diffusion.parameters())
 print(f"  Graph-Aware Diffusion (GAD) parameters: {n_params_diff:,}")
 print(f"  Diffusion steps: {DIFFUSION_STEPS}")
 print(f"  Schedule: Floor Constrained Polynomial (FCPS)")
-print(f"  Denoiser: Rational Graph Filter")
+print(f"  Denoiser: Polynomial Graph Filter")
 
 # ============================================================================
 # TRAINING PHASE 1: AUTOENCODER
@@ -907,7 +907,7 @@ Model Summary (Graph-Aware Diffusion / GAD):
 
 GAD Innovations (arXiv:2510.05036):
   - Floor Constrained Polynomial Schedule (FCPS)
-  - Rational Graph Filter Denoiser (H(λ) = P(λ)/Q(λ))
+  - Polynomial Graph Filter Denoiser (H(S) = Σ θ_k S^k)
   - Eigenvalue-aware latent structure
 
 Training Results:
