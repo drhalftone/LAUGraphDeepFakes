@@ -31,7 +31,7 @@ MESH_RESOLUTION = 0.005  # Slightly coarser for faster generation
 # Parameter ranges for dataset generation
 DIFFUSIVITY_VALUES = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]  # 7 values (thermal conductivity)
 SOURCE_VALUES = [0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0]        # 7 values (heat source strength)
-CYLINDER_Y_VALUES = [-0.03, -0.015, 0.0, 0.015, 0.03]      # 5 values
+# Cylinder fixed at y=0 (mesh geometry must match BC location)
 
 # Fixed domain parameters
 CYLINDER_RADIUS = 0.05
@@ -159,7 +159,7 @@ except Exception as e:
 # ============================================================================
 # PDE SOLVER - Heat equation with parameter-dependent source and BCs
 # ============================================================================
-def solve_heat_equation(points, L, diffusivity, source_strength, cylinder_y):
+def solve_heat_equation(points, L, diffusivity, source_strength):
     """
     Solve steady heat equation: -k*Laplacian(u) = f
     with parameter-dependent source term and boundary conditions.
@@ -168,7 +168,7 @@ def solve_heat_equation(points, L, diffusivity, source_strength, cylinder_y):
     n = len(points)
     x, y = points[:, 0], points[:, 1]
 
-    cx, cy = 0.0, cylinder_y
+    cx, cy = 0.0, 0.0  # Cylinder fixed at origin (matches mesh geometry)
     r = CYLINDER_RADIUS
 
     # Distance from cylinder
@@ -223,11 +223,7 @@ def solve_heat_equation(points, L, diffusivity, source_strength, cylinder_y):
     if u_max > u_min:
         u = (u - u_min) / (u_max - u_min)
 
-    # Compute gradient magnitude as secondary output (like velocity)
-    grad_x = np.zeros(n)
-    grad_y = np.zeros(n)
-
-    return u, grad_x, grad_y
+    return u
 
 # ============================================================================
 # GENERATE ALL SOLUTIONS
@@ -235,33 +231,28 @@ def solve_heat_equation(points, L, diffusivity, source_strength, cylinder_y):
 print("\n[PHASE 3] Generating FEA solutions...")
 
 # Create parameter combinations
-param_combinations = list(product(DIFFUSIVITY_VALUES, SOURCE_VALUES, CYLINDER_Y_VALUES))
+param_combinations = list(product(DIFFUSIVITY_VALUES, SOURCE_VALUES))
 n_samples = len(param_combinations)
 print(f"  Total combinations: {n_samples}")
 print(f"  Parameters: Diffusivity={DIFFUSIVITY_VALUES}")
 print(f"              Source={SOURCE_VALUES}")
-print(f"              Cylinder_Y={CYLINDER_Y_VALUES}")
 
 # Storage arrays
 solutions = np.zeros((n_samples, n_nodes))
-velocities_x = np.zeros((n_samples, n_nodes))
-velocities_y = np.zeros((n_samples, n_nodes))
-parameters = np.zeros((n_samples, 3))  # [peclet, velocity, cylinder_y]
+parameters = np.zeros((n_samples, 2))  # [diffusivity, source]
 
 start_time = time.time()
-for idx, (diffusivity, source, cyl_y) in enumerate(param_combinations):
-    u, gx, gy = solve_heat_equation(points, L, diffusivity, source, cyl_y)
+for idx, (diffusivity, source) in enumerate(param_combinations):
+    u = solve_heat_equation(points, L, diffusivity, source)
     solutions[idx] = u
-    velocities_x[idx] = gx
-    velocities_y[idx] = gy
-    parameters[idx] = [diffusivity, source, cyl_y]
+    parameters[idx] = [diffusivity, source]
 
-    # Progress update every 25 samples
-    if (idx + 1) % 25 == 0 or idx == 0:
+    # Progress update every 10 samples
+    if (idx + 1) % 10 == 0 or idx == 0:
         elapsed = time.time() - start_time
         rate = (idx + 1) / elapsed
         remaining = (n_samples - idx - 1) / rate
-        print(f"  [{idx+1:3d}/{n_samples}] k={diffusivity:.1f}, Q={source:.1f}, Y={cyl_y:+.3f} "
+        print(f"  [{idx+1:3d}/{n_samples}] k={diffusivity:.1f}, Q={source:.1f} "
               f"| {elapsed:.1f}s elapsed, ~{remaining:.1f}s remaining")
 
 print(f"  Completed {n_samples} solutions in {time.time() - start_time:.1f}s")
@@ -289,10 +280,8 @@ print(f"  Saved: {OUTPUT_DIR}/adjacency.npz")
 np.savez(
     f"{OUTPUT_DIR}/solutions.npz",
     solutions=solutions,
-    velocities_x=velocities_x,
-    velocities_y=velocities_y,
     parameters=parameters,
-    param_names=['diffusivity', 'source', 'cylinder_y']
+    param_names=['diffusivity', 'source']
 )
 print(f"  Saved: {OUTPUT_DIR}/solutions.npz")
 
@@ -312,18 +301,18 @@ fig, axes = plt.subplots(3, 3, figsize=(15, 12))
 fig.suptitle(f'Sample FEA Solutions ({n_samples} total in dataset)', fontsize=14, fontweight='bold')
 
 for ax, idx in zip(axes.flatten(), sample_indices):
-    diff, src, cy = parameters[idx]
+    diff, src = parameters[idx]
     sol = solutions[idx]
     # Use fixed levels from 0 to 1 for consistent comparison
     levels = np.linspace(0, 1, 30)
     tcf = ax.tricontourf(triang, sol, levels=levels, cmap='inferno', extend='both')
     ax.tricontour(triang, sol, levels=10, colors='white', linewidths=0.3, alpha=0.5)
-    circle = plt.Circle((0, cy), CYLINDER_RADIUS, fill=True, color='cyan', ec='black', lw=1)
+    circle = plt.Circle((0, 0), CYLINDER_RADIUS, fill=True, color='cyan', ec='black', lw=1)
     ax.add_patch(circle)
     ax.set_xlim(X_MIN - margin, X_MAX + margin)
     ax.set_ylim(Y_MIN - margin, Y_MAX + margin)
     ax.set_aspect('equal')
-    ax.set_title(f'k={diff:.1f}, Q={src:.1f}, Y={cy:+.02f}', fontsize=10)
+    ax.set_title(f'k={diff:.1f}, Q={src:.1f}', fontsize=10)
     ax.set_xticks([])
     ax.set_yticks([])
 
@@ -337,7 +326,7 @@ plt.savefig(f'{OUTPUT_DIR}/sample_solutions.png', dpi=150, bbox_inches='tight')
 print(f"  Saved: {OUTPUT_DIR}/sample_solutions.png")
 
 # Visualize parameter space coverage
-fig2, axes2 = plt.subplots(1, 3, figsize=(14, 4))
+fig2, axes2 = plt.subplots(1, 2, figsize=(10, 4))
 fig2.suptitle('Dataset Parameter Coverage', fontsize=14, fontweight='bold')
 
 ax = axes2[0]
@@ -351,12 +340,6 @@ ax.hist(parameters[:, 1], bins=len(SOURCE_VALUES), edgecolor='black', alpha=0.7)
 ax.set_xlabel('Source Strength (Q)')
 ax.set_ylabel('Count')
 ax.set_title('Source Distribution')
-
-ax = axes2[2]
-ax.hist(parameters[:, 2], bins=len(CYLINDER_Y_VALUES), edgecolor='black', alpha=0.7)
-ax.set_xlabel('Cylinder Y Position')
-ax.set_ylabel('Count')
-ax.set_title('Cylinder Position Distribution')
 
 plt.tight_layout()
 plt.savefig(f'{OUTPUT_DIR}/parameter_coverage.png', dpi=150, bbox_inches='tight')
@@ -372,10 +355,10 @@ print(f"""
 Dataset Summary:
   - Samples: {n_samples} FEA solutions (steady heat equation)
   - Mesh: {n_nodes} nodes, {n_elements} elements
+  - Cylinder: Fixed at origin (y=0)
   - Parameters varied:
       Diffusivity: {DIFFUSIVITY_VALUES}
       Source:      {SOURCE_VALUES}
-      Cylinder Y:  {CYLINDER_Y_VALUES}
 
 Files saved to '{OUTPUT_DIR}/':
   - mesh.npz        : Node positions, triangles, eigenvectors
@@ -388,7 +371,7 @@ Files saved to '{OUTPUT_DIR}/':
 Next steps:
   1. Load dataset: data = np.load('dataset/solutions.npz')
   2. Access solutions: data['solutions'].shape = ({n_samples}, {n_nodes})
-  3. Access parameters: data['parameters'].shape = ({n_samples}, 3)
+  3. Access parameters: data['parameters'].shape = ({n_samples}, 2)
   4. Train graph autoencoder on solutions
   5. Fit diffusion model in latent space
 """)
