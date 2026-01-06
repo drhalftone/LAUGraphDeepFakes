@@ -227,12 +227,15 @@ Output: predicted noise ε (T, V, 3)
 ### Graph Construction from Mesh
 
 ```python
-def mesh_to_graph(cells):
+def mesh_to_graph(cells, pos):
     """
-    Convert triangle mesh to graph edges.
+    Convert triangle mesh to graph edges WITH EDGE FEATURES.
 
     cells: (F, 3) triangle vertex indices
-    returns: edge_index (2, E) for PyTorch Geometric
+    pos: (V, 3) vertex positions (rest state)
+    returns:
+        edge_index: (2, E) for PyTorch Geometric
+        edge_attr: (E, 4) edge features [direction_x, direction_y, direction_z, length]
     """
     edges = set()
     for tri in cells:
@@ -244,11 +247,23 @@ def mesh_to_graph(cells):
         edges.add((tri[2], tri[0]))
         edges.add((tri[0], tri[2]))
 
-    edge_index = torch.tensor(list(edges)).T  # (2, E)
-    return edge_index
+    edge_list = list(edges)
+    edge_index = torch.tensor(edge_list).T  # (2, E)
+
+    # IMPORTANT: Compute edge features (direction vectors)
+    # This allows the GNN to distinguish neighbors in different directions
+    # (like a CNN kernel has different weights for different positions)
+    src, dst = edge_index
+    edge_vec = pos[dst] - pos[src]  # (E, 3) vector from src to dst
+    edge_len = edge_vec.norm(dim=-1, keepdim=True)  # (E, 1)
+    edge_attr = torch.cat([edge_vec, edge_len], dim=-1)  # (E, 4)
+
+    return edge_index, edge_attr
 ```
 
-### MeshConv Layer (Message Passing)
+**Why edge features matter**: Without them, the GNN treats all neighbors identically (isotropic). With edge features encoding the direction to each neighbor, the network can learn position-dependent filters like a CNN kernel.
+
+### MeshConv Layer (Message Passing with Edge Features)
 
 ```python
 import torch
@@ -257,28 +272,38 @@ from torch_geometric.nn import MessagePassing
 
 class MeshConv(MessagePassing):
     """
-    Graph convolution for mesh data.
-    Aggregates features from neighboring vertices.
+    Graph convolution for mesh data WITH EDGE FEATURES.
+
+    Unlike basic message passing that treats all neighbors the same,
+    this layer uses edge features (direction vectors) to distinguish
+    neighbors in different directions - similar to how CNN kernels
+    have different weights for different positions.
     """
-    def __init__(self, in_dim, out_dim):
+    def __init__(self, in_dim, out_dim, edge_dim=4):
         super().__init__(aggr='mean')  # Mean aggregation
 
+        # MLP takes: source features + target features + edge features
         self.mlp = nn.Sequential(
-            nn.Linear(in_dim * 2, out_dim),
+            nn.Linear(in_dim * 2 + edge_dim, out_dim),
             nn.LayerNorm(out_dim),
             nn.SiLU(),
             nn.Linear(out_dim, out_dim),
         )
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_attr):
         # x: (V, D) node features
         # edge_index: (2, E) edges
-        return self.propagate(edge_index, x=x)
+        # edge_attr: (E, edge_dim) edge features (direction + length)
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
-    def message(self, x_i, x_j):
-        # x_i: target node features
-        # x_j: source (neighbor) node features
-        return self.mlp(torch.cat([x_i, x_j], dim=-1))
+    def message(self, x_i, x_j, edge_attr):
+        # x_i: target node features (V, D)
+        # x_j: source (neighbor) node features (V, D)
+        # edge_attr: edge features including direction (E, edge_dim)
+        #
+        # The edge_attr tells the network: "this neighbor is in THIS direction"
+        # This is how we achieve position-dependent weights like CNNs
+        return self.mlp(torch.cat([x_i, x_j, edge_attr], dim=-1))
 ```
 
 ### GNN Encoder
@@ -287,27 +312,29 @@ class MeshConv(MessagePassing):
 class MeshEncoder(nn.Module):
     """
     Encode per-vertex 3D positions to feature vectors.
+    Uses edge features to distinguish neighbor directions.
     """
-    def __init__(self, in_dim=3, hidden_dim=64, out_dim=128, num_layers=4):
+    def __init__(self, in_dim=3, hidden_dim=64, out_dim=128, num_layers=4, edge_dim=4):
         super().__init__()
 
         self.input_proj = nn.Linear(in_dim, hidden_dim)
 
         self.layers = nn.ModuleList([
-            MeshConv(hidden_dim, hidden_dim)
+            MeshConv(hidden_dim, hidden_dim, edge_dim=edge_dim)
             for _ in range(num_layers)
         ])
 
         self.output_proj = nn.Linear(hidden_dim, out_dim)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_attr):
         # x: (V, 3) vertex positions
         # edge_index: (2, E)
+        # edge_attr: (E, edge_dim) edge features (direction + length)
 
         h = self.input_proj(x)  # (V, hidden_dim)
 
         for layer in self.layers:
-            h = h + layer(h, edge_index)  # Residual connection
+            h = h + layer(h, edge_index, edge_attr)  # Residual connection
 
         return self.output_proj(h)  # (V, out_dim)
 ```
@@ -318,26 +345,29 @@ class MeshEncoder(nn.Module):
 class MeshDecoder(nn.Module):
     """
     Decode feature vectors back to 3D positions (noise prediction).
+    Uses edge features to distinguish neighbor directions.
     """
-    def __init__(self, in_dim=128, hidden_dim=64, out_dim=3, num_layers=4):
+    def __init__(self, in_dim=128, hidden_dim=64, out_dim=3, num_layers=4, edge_dim=4):
         super().__init__()
 
         self.input_proj = nn.Linear(in_dim, hidden_dim)
 
         self.layers = nn.ModuleList([
-            MeshConv(hidden_dim, hidden_dim)
+            MeshConv(hidden_dim, hidden_dim, edge_dim=edge_dim)
             for _ in range(num_layers)
         ])
 
         self.output_proj = nn.Linear(hidden_dim, out_dim)
 
-    def forward(self, h, edge_index):
+    def forward(self, h, edge_index, edge_attr):
         # h: (V, in_dim) features
+        # edge_index: (2, E)
+        # edge_attr: (E, edge_dim) edge features (direction + length)
 
         h = self.input_proj(h)
 
         for layer in self.layers:
-            h = h + layer(h, edge_index)
+            h = h + layer(h, edge_index, edge_attr)
 
         return self.output_proj(h)  # (V, 3)
 ```
@@ -412,20 +442,32 @@ class TimestepEmbedding(nn.Module):
 class TrajectoryDiffusion(nn.Module):
     """
     Full trajectory diffusion model with GNN + Transformer.
+    Uses edge features for direction-aware message passing.
     """
     def __init__(self,
-                 num_vertices=1579,
+                 cells,           # (F, 3) mesh triangles
+                 mesh_pos,        # (V, 3) rest-state vertex positions
                  hidden_dim=128,
                  num_gnn_layers=4,
                  num_transformer_layers=4,
-                 num_heads=8):
+                 num_heads=8,
+                 edge_dim=4):
         super().__init__()
+
+        # Precompute graph structure and edge features from mesh
+        # Edge features encode direction vectors - this is computed once from rest state
+        edge_index, edge_attr = mesh_to_graph(cells, mesh_pos)
+        self.register_buffer('edge_index', edge_index)
+        self.register_buffer('edge_attr', edge_attr)
+
+        self.num_vertices = mesh_pos.shape[0]
 
         self.encoder = MeshEncoder(
             in_dim=3,
             hidden_dim=hidden_dim//2,
             out_dim=hidden_dim,
-            num_layers=num_gnn_layers
+            num_layers=num_gnn_layers,
+            edge_dim=edge_dim
         )
 
         self.time_embed = TimestepEmbedding(hidden_dim)
@@ -452,16 +494,14 @@ class TrajectoryDiffusion(nn.Module):
             in_dim=hidden_dim,
             hidden_dim=hidden_dim//2,
             out_dim=3,
-            num_layers=num_gnn_layers
+            num_layers=num_gnn_layers,
+            edge_dim=edge_dim
         )
 
-        self.num_vertices = num_vertices
-
-    def forward(self, x, t, edge_index):
+    def forward(self, x, t):
         """
         x: (B, T, V, 3) noisy trajectory
-        t: (B,) diffusion timestep
-        edge_index: (2, E) mesh edges
+        t: (B,) diffusion timestep (noise_step)
 
         returns: (B, T, V, 3) predicted noise
         """
@@ -474,10 +514,10 @@ class TrajectoryDiffusion(nn.Module):
         # Reshape: (B, T, V, 3) -> (B*T, V, 3)
         x_flat = x.reshape(B * T, V, C)
 
-        # Process each frame
+        # Process each frame with edge features
         h_list = []
         for i in range(B * T):
-            h_frame = self.encoder(x_flat[i], edge_index)  # (V, D)
+            h_frame = self.encoder(x_flat[i], self.edge_index, self.edge_attr)  # (V, D)
             h_list.append(h_frame)
         h = torch.stack(h_list)  # (B*T, V, D)
 
@@ -494,14 +534,36 @@ class TrajectoryDiffusion(nn.Module):
         h = h.unsqueeze(2).expand(-1, -1, V, -1)  # (B, T, V, D)
         h = h.reshape(B * T, V, -1)  # (B*T, V, D)
 
-        # Decode each frame with GNN
+        # Decode each frame with GNN using edge features
         out_list = []
         for i in range(B * T):
-            out_frame = self.decoder(h[i], edge_index)  # (V, 3)
+            out_frame = self.decoder(h[i], self.edge_index, self.edge_attr)  # (V, 3)
             out_list.append(out_frame)
         out = torch.stack(out_list)  # (B*T, V, 3)
 
         return out.reshape(B, T, V, C)  # (B, T, V, 3)
+```
+
+### Model Initialization Example
+
+```python
+# Load mesh data
+data = np.load('flag_data/flag_test.npz')
+cells = torch.tensor(data['cells'], dtype=torch.long)
+mesh_pos = torch.tensor(data['mesh_pos'], dtype=torch.float32)
+
+# Create model - edge features are computed automatically from mesh
+model = TrajectoryDiffusion(
+    cells=cells,
+    mesh_pos=mesh_pos,
+    hidden_dim=128,
+    num_gnn_layers=4,
+).cuda()
+
+# Forward pass - no need to pass edge_index separately
+x = torch.randn(4, 100, 1579, 3).cuda()  # batch of 4, 100 timesteps
+t = torch.randint(0, 1000, (4,)).cuda()   # noise steps
+noise_pred = model(x, t)
 ```
 
 ### Memory-Efficient Alternative
@@ -511,19 +573,22 @@ The above processes each frame separately. For efficiency, use batched GNN:
 ```python
 from torch_geometric.data import Batch, Data
 
-def batch_frames(x, edge_index):
-    """Batch all frames for efficient GNN processing."""
+def batch_frames(x, edge_index, edge_attr):
+    """Batch all frames for efficient GNN processing with edge features."""
     B, T, V, C = x.shape
 
     # Create a batch of graphs (one per frame)
+    # Each graph shares the same edge structure and edge features
     data_list = []
     for b in range(B):
         for t in range(T):
-            data = Data(x=x[b, t], edge_index=edge_index)
+            data = Data(x=x[b, t], edge_index=edge_index, edge_attr=edge_attr)
             data_list.append(data)
 
     return Batch.from_data_list(data_list)
 ```
+
+**Note**: Edge features are computed from the rest-state mesh positions and remain constant across all frames. This is intentional - the direction vectors describe the mesh connectivity structure, not the deformed state. The GNN uses these to know "which direction is my neighbor" when aggregating messages.
 
 ### Model Size Estimates
 
