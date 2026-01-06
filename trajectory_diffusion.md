@@ -191,6 +191,350 @@ python train_flag_diffusion.py  # to be written
 - [MeshGraphNets](https://arxiv.org/abs/2010.03409) (Pfaff et al., 2021)
 - [Diffusion Models Beat GANs](https://arxiv.org/abs/2105.05233) (Dhariwal & Nichol, 2021)
 
+## Detailed GNN Architecture
+
+### Overview
+
+```
+Input: noisy trajectory x_t (T, V, 3) + timestep t
+Output: predicted noise ε (T, V, 3)
+
+┌─────────────────────────────────────────────────────────┐
+│                                                         │
+│   x_t (T, V, 3)          t (scalar)                     │
+│        │                     │                          │
+│        ▼                     ▼                          │
+│   [Per-frame GNN]      [Timestep MLP]                   │
+│        │                     │                          │
+│        ▼                     ▼                          │
+│   (T, V, D)              (D,) ──────┐                   │
+│        │                            │                   │
+│        ▼                            │                   │
+│   [Temporal Transformer] ◄──────────┘                   │
+│        │                                                │
+│        ▼                                                │
+│   (T, V, D)                                             │
+│        │                                                │
+│        ▼                                                │
+│   [Per-frame GNN Decoder]                               │
+│        │                                                │
+│        ▼                                                │
+│   ε_pred (T, V, 3)                                      │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Graph Construction from Mesh
+
+```python
+def mesh_to_graph(cells):
+    """
+    Convert triangle mesh to graph edges.
+
+    cells: (F, 3) triangle vertex indices
+    returns: edge_index (2, E) for PyTorch Geometric
+    """
+    edges = set()
+    for tri in cells:
+        # Add edges for each triangle edge (bidirectional)
+        edges.add((tri[0], tri[1]))
+        edges.add((tri[1], tri[0]))
+        edges.add((tri[1], tri[2]))
+        edges.add((tri[2], tri[1]))
+        edges.add((tri[2], tri[0]))
+        edges.add((tri[0], tri[2]))
+
+    edge_index = torch.tensor(list(edges)).T  # (2, E)
+    return edge_index
+```
+
+### MeshConv Layer (Message Passing)
+
+```python
+import torch
+import torch.nn as nn
+from torch_geometric.nn import MessagePassing
+
+class MeshConv(MessagePassing):
+    """
+    Graph convolution for mesh data.
+    Aggregates features from neighboring vertices.
+    """
+    def __init__(self, in_dim, out_dim):
+        super().__init__(aggr='mean')  # Mean aggregation
+
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim * 2, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.SiLU(),
+            nn.Linear(out_dim, out_dim),
+        )
+
+    def forward(self, x, edge_index):
+        # x: (V, D) node features
+        # edge_index: (2, E) edges
+        return self.propagate(edge_index, x=x)
+
+    def message(self, x_i, x_j):
+        # x_i: target node features
+        # x_j: source (neighbor) node features
+        return self.mlp(torch.cat([x_i, x_j], dim=-1))
+```
+
+### GNN Encoder
+
+```python
+class MeshEncoder(nn.Module):
+    """
+    Encode per-vertex 3D positions to feature vectors.
+    """
+    def __init__(self, in_dim=3, hidden_dim=64, out_dim=128, num_layers=4):
+        super().__init__()
+
+        self.input_proj = nn.Linear(in_dim, hidden_dim)
+
+        self.layers = nn.ModuleList([
+            MeshConv(hidden_dim, hidden_dim)
+            for _ in range(num_layers)
+        ])
+
+        self.output_proj = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, x, edge_index):
+        # x: (V, 3) vertex positions
+        # edge_index: (2, E)
+
+        h = self.input_proj(x)  # (V, hidden_dim)
+
+        for layer in self.layers:
+            h = h + layer(h, edge_index)  # Residual connection
+
+        return self.output_proj(h)  # (V, out_dim)
+```
+
+### GNN Decoder
+
+```python
+class MeshDecoder(nn.Module):
+    """
+    Decode feature vectors back to 3D positions (noise prediction).
+    """
+    def __init__(self, in_dim=128, hidden_dim=64, out_dim=3, num_layers=4):
+        super().__init__()
+
+        self.input_proj = nn.Linear(in_dim, hidden_dim)
+
+        self.layers = nn.ModuleList([
+            MeshConv(hidden_dim, hidden_dim)
+            for _ in range(num_layers)
+        ])
+
+        self.output_proj = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, h, edge_index):
+        # h: (V, in_dim) features
+
+        h = self.input_proj(h)
+
+        for layer in self.layers:
+            h = h + layer(h, edge_index)
+
+        return self.output_proj(h)  # (V, 3)
+```
+
+### Temporal Transformer
+
+```python
+class TemporalTransformer(nn.Module):
+    """
+    Process temporal sequence of frame embeddings.
+    """
+    def __init__(self, dim=128, num_heads=8, num_layers=4, max_len=512):
+        super().__init__()
+
+        self.pos_embed = nn.Parameter(torch.randn(1, max_len, dim) * 0.02)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=dim,
+            nhead=num_heads,
+            dim_feedforward=dim * 4,
+            dropout=0.1,
+            activation='gelu',
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
+
+    def forward(self, x, t_embed):
+        # x: (B, T, V, D) or (B, T, D) if already pooled per frame
+        # t_embed: (B, D) timestep embedding
+
+        B, T, D = x.shape
+
+        # Add positional embedding
+        x = x + self.pos_embed[:, :T, :]
+
+        # Add timestep embedding to all frames
+        x = x + t_embed.unsqueeze(1)
+
+        # Transformer
+        return self.transformer(x)  # (B, T, D)
+```
+
+### Timestep Embedding
+
+```python
+class TimestepEmbedding(nn.Module):
+    """
+    Sinusoidal timestep embedding (like in original DDPM).
+    """
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.SiLU(),
+            nn.Linear(dim * 4, dim),
+        )
+
+    def forward(self, t):
+        # t: (B,) timestep indices
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
+        emb = t[:, None] * emb[None, :]
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+        return self.mlp(emb)  # (B, dim)
+```
+
+### Full Diffusion Model
+
+```python
+class TrajectoryDiffusion(nn.Module):
+    """
+    Full trajectory diffusion model with GNN + Transformer.
+    """
+    def __init__(self,
+                 num_vertices=1579,
+                 hidden_dim=128,
+                 num_gnn_layers=4,
+                 num_transformer_layers=4,
+                 num_heads=8):
+        super().__init__()
+
+        self.encoder = MeshEncoder(
+            in_dim=3,
+            hidden_dim=hidden_dim//2,
+            out_dim=hidden_dim,
+            num_layers=num_gnn_layers
+        )
+
+        self.time_embed = TimestepEmbedding(hidden_dim)
+
+        # Pool per-vertex features to per-frame (for transformer efficiency)
+        self.frame_pool = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+        )
+
+        self.temporal = TemporalTransformer(
+            dim=hidden_dim,
+            num_heads=num_heads,
+            num_layers=num_transformer_layers,
+        )
+
+        # Unpool back to per-vertex
+        self.frame_unpool = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+        )
+
+        self.decoder = MeshDecoder(
+            in_dim=hidden_dim,
+            hidden_dim=hidden_dim//2,
+            out_dim=3,
+            num_layers=num_gnn_layers
+        )
+
+        self.num_vertices = num_vertices
+
+    def forward(self, x, t, edge_index):
+        """
+        x: (B, T, V, 3) noisy trajectory
+        t: (B,) diffusion timestep
+        edge_index: (2, E) mesh edges
+
+        returns: (B, T, V, 3) predicted noise
+        """
+        B, T, V, C = x.shape
+
+        # Timestep embedding
+        t_emb = self.time_embed(t)  # (B, D)
+
+        # Encode each frame with GNN
+        # Reshape: (B, T, V, 3) -> (B*T, V, 3)
+        x_flat = x.reshape(B * T, V, C)
+
+        # Process each frame
+        h_list = []
+        for i in range(B * T):
+            h_frame = self.encoder(x_flat[i], edge_index)  # (V, D)
+            h_list.append(h_frame)
+        h = torch.stack(h_list)  # (B*T, V, D)
+
+        # Pool to per-frame embedding
+        h = h.mean(dim=1)  # (B*T, D) - mean over vertices
+        h = self.frame_pool(h)
+        h = h.reshape(B, T, -1)  # (B, T, D)
+
+        # Temporal transformer
+        h = self.temporal(h, t_emb)  # (B, T, D)
+
+        # Unpool to per-vertex
+        h = self.frame_unpool(h)  # (B, T, D)
+        h = h.unsqueeze(2).expand(-1, -1, V, -1)  # (B, T, V, D)
+        h = h.reshape(B * T, V, -1)  # (B*T, V, D)
+
+        # Decode each frame with GNN
+        out_list = []
+        for i in range(B * T):
+            out_frame = self.decoder(h[i], edge_index)  # (V, 3)
+            out_list.append(out_frame)
+        out = torch.stack(out_list)  # (B*T, V, 3)
+
+        return out.reshape(B, T, V, C)  # (B, T, V, 3)
+```
+
+### Memory-Efficient Alternative
+
+The above processes each frame separately. For efficiency, use batched GNN:
+
+```python
+from torch_geometric.data import Batch, Data
+
+def batch_frames(x, edge_index):
+    """Batch all frames for efficient GNN processing."""
+    B, T, V, C = x.shape
+
+    # Create a batch of graphs (one per frame)
+    data_list = []
+    for b in range(B):
+        for t in range(T):
+            data = Data(x=x[b, t], edge_index=edge_index)
+            data_list.append(data)
+
+    return Batch.from_data_list(data_list)
+```
+
+### Model Size Estimates
+
+| Variant | Parameters | VRAM (batch=4) |
+|---------|------------|----------------|
+| Small (D=64, L=2) | ~500K | ~2GB |
+| Medium (D=128, L=4) | ~2M | ~4GB |
+| Large (D=256, L=6) | ~8M | ~8GB |
+
+Start with **Small** for testing, scale up as needed.
+
 ## Hardware requirements
 
 - **GPU**: Recommended (RTX 3080+ or similar)
