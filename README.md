@@ -32,16 +32,18 @@ python train_model.py
 ```
 LAUGraphDeepFakes/
 ├── dataset/                    # FEA training data (heat equation)
-├── flag_data/                  # Flag simulation data (download separately)
+├── flag_data/                  # Flag simulation data (downloaded by setup script)
 ├── docs/                       # Documentation and notes
 │   ├── trajectory_diffusion.md # Main diffusion approach (START HERE)
 │   ├── spectral_vae_augmentation.md
 │   └── graph_signal_augmentation.md
 ├── reports/                    # LaTeX reports
 │   └── diffusion_for_graph_signals.tex
+├── setup_flag_data.py         # Download & prepare flag data (run first)
+├── train_flag_diffusion.py    # Train trajectory diffusion model
 ├── train_model.py             # Original VAE+Diffusion for FEA
 ├── train_spectral_vae.py      # Spectral VAE approach
-├── load_flag_data.py          # Load DeepMind flag data
+├── load_flag_data.py          # Load DeepMind flag data (used by setup)
 ├── generate_flag_noise.py     # Noise filtering baseline
 └── setup_gpu.sh               # GPU environment setup
 ```
@@ -51,6 +53,18 @@ LAUGraphDeepFakes/
 See **[docs/trajectory_diffusion.md](docs/trajectory_diffusion.md)** for the latest approach using diffusion models with GNNs for mesh trajectory generation.
 
 **Key insight**: Diffusion models support data augmentation by controlling noise injection level - add less noise to stay closer to the original signal.
+
+### Quick Start (Flag Diffusion)
+
+```bash
+# 1. Setup data (downloads ~1GB, converts to numpy)
+python setup_flag_data.py
+
+# 2. Train diffusion model (requires GPU)
+python train_flag_diffusion.py
+```
+
+Output goes to `flag_diffusion_output/`.
 
 ## Setup Options
 
