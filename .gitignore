@@ -25,3 +25,10 @@ flag_data/*.png
 
 # Jupyter
 .ipynb_checkpoints/
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
