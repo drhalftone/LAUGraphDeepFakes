@@ -9,6 +9,12 @@ __pycache__/
 
 # Training outputs (large files)
 training_output/
+spectral_vae_output/
+
+# Large data files
+*.tfrecord
+flag_data/*.npz
+flag_data/*.png
 
 # IDE
 .vscode/
