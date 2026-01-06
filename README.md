@@ -31,19 +31,26 @@ python train_model.py
 
 ```
 LAUGraphDeepFakes/
-├── dataset/                    # Pre-generated training data
-│   ├── mesh.npz               # Node positions, triangles, eigenvectors
-│   ├── solutions.npz          # 49 FEA solutions
-│   ├── laplacian.npz          # Graph Laplacian (sparse)
-│   └── adjacency.npz          # Adjacency weights (sparse)
-├── train_model.py             # Main training script
-├── train_model.ipynb          # Jupyter notebook (interactive)
-├── generate_dataset.py        # Dataset generation script
-├── run_simulation.py          # Single simulation visualization
-├── setup_gpu.sh               # GPU environment setup
-├── setup.sh                   # CPU environment setup
-└── requirements.txt           # Python dependencies
+├── dataset/                    # FEA training data (heat equation)
+├── flag_data/                  # Flag simulation data (download separately)
+├── docs/                       # Documentation and notes
+│   ├── trajectory_diffusion.md # Main diffusion approach (START HERE)
+│   ├── spectral_vae_augmentation.md
+│   └── graph_signal_augmentation.md
+├── reports/                    # LaTeX reports
+│   └── diffusion_for_graph_signals.tex
+├── train_model.py             # Original VAE+Diffusion for FEA
+├── train_spectral_vae.py      # Spectral VAE approach
+├── load_flag_data.py          # Load DeepMind flag data
+├── generate_flag_noise.py     # Noise filtering baseline
+└── setup_gpu.sh               # GPU environment setup
 ```
+
+## Current Approach: Trajectory Diffusion
+
+See **[docs/trajectory_diffusion.md](docs/trajectory_diffusion.md)** for the latest approach using diffusion models with GNNs for mesh trajectory generation.
+
+**Key insight**: Diffusion models support data augmentation by controlling noise injection level - add less noise to stay closer to the original signal.
 
 ## Setup Options
 
@@ -172,7 +179,7 @@ This project was inspired by:
 - Spectral mesh processing and manifold harmonics
 - Graph-Aware Diffusion (GAD) for signal generation ([arXiv:2510.05036](https://arxiv.org/abs/2510.05036))
 
-See the included `.md` files for conversation notes.
+See the `docs/` folder for detailed documentation and the `reports/` folder for LaTeX reports.
 
 ## License
 

@@ -1,0 +1,278 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\title{Diffusion Models for Graph Signal Augmentation:\\From Noise to Realistic Mesh Dynamics}
+\author{Technical Report}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report describes the application of diffusion models to generate realistic graph signals on fixed meshes. We motivate the approach by examining the limitations of simpler methods (spectral filtering, VAEs), then develop a graph neural network-based diffusion model for trajectory generation. A key insight is that the diffusion framework naturally supports data augmentation by controlling the noise injection level, allowing generation of signals that are ``similar but not identical'' to training examples.
+\end{abstract}
+
+\section{Introduction and Motivation}
+
+\subsection{The Problem}
+Given a set of graph signals defined on a fixed mesh (e.g., simulation results from finite element analysis or physics simulations), we want to generate new signals that:
+\begin{enumerate}
+    \item Look realistic (could plausibly come from the same physical process)
+    \item Are diverse (not identical to training examples)
+    \item Respect the underlying structure (mesh connectivity, boundary conditions)
+\end{enumerate}
+
+\subsection{Use Case: Data Augmentation}
+The primary application is \textbf{data augmentation} for training other graph neural networks. When real simulation data is expensive to generate, we want to:
+\begin{itemize}
+    \item Take a small set of real examples
+    \item Generate many similar-but-different variations
+    \item Use these to augment training data
+\end{itemize}
+
+\section{Methods We Explored}
+
+\subsection{Approach 1: Spectral Noise Filtering}
+
+\subsubsection{Method}
+The idea was to use the Windowed Graph Fourier Transform (following Shuman et al.) to:
+\begin{enumerate}
+    \item Compute the spectral envelope $|S(v, \lambda)|$ of a real signal
+    \item Generate white noise in the spectral domain
+    \item Filter the noise with the spectral envelope
+    \item Inverse transform to get a new signal
+\end{enumerate}
+
+\subsubsection{Result}
+This approach failed to capture:
+\begin{itemize}
+    \item \textbf{Boundary conditions}: Fixed vertices (e.g., flag pole) moved freely
+    \item \textbf{Spatial coherence}: Nearby vertices should move together
+    \item \textbf{Temporal smoothness}: Generated motion was too jittery
+\end{itemize}
+
+The spectral envelope captures only marginal statistics, not the joint structure.
+
+\subsection{Approach 2: Spectral VAE}
+
+\subsubsection{Method}
+A variational autoencoder operating in the spectral domain:
+\begin{equation}
+    x \xrightarrow{\text{GFT}} \hat{x} \xrightarrow{\text{Encoder}} \mu, \sigma \xrightarrow{z = \mu + \sigma \cdot \epsilon} \xrightarrow{\text{Decoder}} \hat{x}' \xrightarrow{\text{IGFT}} x'
+\end{equation}
+
+Noise is injected in the latent space via the reparameterization trick.
+
+\subsubsection{Result}
+On steady-state FEA data (heat equation solutions), the VAE produced outputs nearly identical to inputs. The training data lacked diversity---all signals were smooth heat distributions varying only in parameters.
+
+\textbf{Key insight}: Generative models need diverse training data to learn meaningful variation.
+
+\section{Diffusion Models: The Solution}
+
+\subsection{Why Diffusion?}
+Diffusion models are the current state-of-the-art for generative AI (Stable Diffusion, DALL-E 3, Sora). They:
+\begin{itemize}
+    \item Learn implicit constraints from data
+    \item Generate high-quality, diverse outputs
+    \item Handle high-dimensional data naturally
+    \item Support controllable generation
+\end{itemize}
+
+\subsection{The Diffusion Process}
+
+\subsubsection{Forward Process (Adding Noise)}
+Given a clean signal $x_0$, we progressively add Gaussian noise:
+\begin{equation}
+    x_n = \sqrt{\bar{\alpha}_n} \, x_0 + \sqrt{1 - \bar{\alpha}_n} \, \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)
+\end{equation}
+where $\bar{\alpha}_n = \prod_{i=1}^{n} \alpha_i$ is the cumulative noise schedule, and $n$ is the \textbf{noise step} (not to be confused with simulation time $t$).
+
+At $n = 0$: signal is clean ($x_0$).\\
+At $n = N$: signal is pure noise ($x_N \approx \mathcal{N}(0, I)$).
+
+\subsubsection{Reverse Process (Denoising)}
+A neural network $\epsilon_\theta$ learns to predict the noise:
+\begin{equation}
+    \hat{\epsilon} = \epsilon_\theta(x_n, n)
+\end{equation}
+
+Given $\hat{\epsilon}$, we can estimate the clean signal and take a denoising step.
+
+\subsubsection{Training}
+\begin{algorithm}
+\caption{Diffusion Training}
+\begin{algorithmic}[1]
+\Repeat
+    \State Sample $x_0 \sim$ training data
+    \State Sample $n \sim \text{Uniform}(1, N)$
+    \State Sample $\epsilon \sim \mathcal{N}(0, I)$
+    \State $x_n \gets \sqrt{\bar{\alpha}_n} \, x_0 + \sqrt{1 - \bar{\alpha}_n} \, \epsilon$
+    \State Gradient step on $\|\epsilon - \epsilon_\theta(x_n, n)\|^2$
+\Until{converged}
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Generation}
+\begin{algorithm}
+\caption{Diffusion Generation}
+\begin{algorithmic}[1]
+\State $x_N \sim \mathcal{N}(0, I)$ \Comment{Start from pure noise}
+\For{$n = N, N-1, \ldots, 1$}
+    \State $\hat{\epsilon} \gets \epsilon_\theta(x_n, n)$
+    \State $x_{n-1} \gets \text{DenoisingStep}(x_n, \hat{\epsilon}, n)$
+\EndFor
+\State \Return $x_0$ \Comment{Clean generated signal}
+\end{algorithmic}
+\end{algorithm}
+
+\section{Key Insight: Augmentation via Partial Denoising}
+
+\subsection{The ``img2img'' Trick}
+Instead of starting from pure noise, we can:
+\begin{enumerate}
+    \item Take a \textbf{real} signal $x_0$
+    \item Add noise to an \textbf{intermediate} level $n^*$
+    \item Denoise from $n^*$ down to $0$
+\end{enumerate}
+
+This produces a signal that is a \textbf{variation} of the original.
+
+\begin{algorithm}
+\caption{Signal Augmentation via Partial Denoising}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Real signal $x_0$, starting noise step $n^*$
+\State Sample $\epsilon \sim \mathcal{N}(0, I)$
+\State $x_{n^*} \gets \sqrt{\bar{\alpha}_{n^*}} \, x_0 + \sqrt{1 - \bar{\alpha}_{n^*}} \, \epsilon$
+\For{$n = n^*, n^*-1, \ldots, 1$}
+    \State $\hat{\epsilon} \gets \epsilon_\theta(x_n, n)$
+    \State $x_{n-1} \gets \text{DenoisingStep}(x_n, \hat{\epsilon}, n)$
+\EndFor
+\State \Return $x_0$ \Comment{Augmented signal}
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Controlling Similarity}
+The starting noise step $n^*$ acts as a ``similarity dial'':
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+$n^*$ & Noise Added & Result \\
+\midrule
+$N$ (e.g., 1000) & Maximum & Completely new signal \\
+$0.7N$ (e.g., 700) & High & Loosely similar to original \\
+$0.3N$ (e.g., 300) & Medium & Same structure, different details \\
+$0.1N$ (e.g., 100) & Low & Very close to original \\
+$0$ & None & Identical to input \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{This is exactly the augmentation we originally wanted}: generate signals that are similar but not identical, with controllable similarity.
+
+\section{Architecture for Mesh Data}
+
+\subsection{Why Graph Neural Networks?}
+Mesh data is not a regular grid, so standard convolutions don't apply. We use GNNs that:
+\begin{itemize}
+    \item Respect mesh connectivity (which vertices are neighbors)
+    \item Handle irregular topology
+    \item Encode spatial structure naturally
+\end{itemize}
+
+\subsection{Model Architecture}
+
+For trajectory data $(T \times V \times 3)$ where $T$ is the number of simulation frames, $V$ is the number of vertices, and $3$ is the spatial dimension:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Component & Purpose \\
+\midrule
+GNN Encoder & Process each frame, respecting mesh structure \\
+Temporal Transformer & Model dynamics across simulation time \\
+Noise Step Embedding & Condition on diffusion noise level $n$ \\
+GNN Decoder & Output denoised positions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Message Passing on Meshes}
+The GNN uses message passing on mesh edges:
+\begin{equation}
+    h_i^{(l+1)} = h_i^{(l)} + \text{Aggregate}_{j \in \mathcal{N}(i)} \text{MLP}\left(h_i^{(l)}, h_j^{(l)}\right)
+\end{equation}
+where $\mathcal{N}(i)$ is the set of vertices connected to vertex $i$ by a mesh edge.
+
+\section{Connection to Original Goals}
+
+\begin{center}
+\begin{tabular}{p{5cm}p{7cm}}
+\toprule
+Original Goal & How Diffusion Achieves It \\
+\midrule
+Generate similar-but-different signals & Partial denoising with controllable $n^*$ \\
+Augment training data & Generate many variations from few examples \\
+Respect mesh structure & GNN encoder/decoder uses mesh connectivity \\
+Capture temporal dynamics & Temporal transformer models sequence \\
+Learn implicit constraints & Training on real data learns physics \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Summary}
+
+\begin{enumerate}
+    \item \textbf{Simple approaches failed}: Spectral filtering and small VAEs couldn't capture the full structure of mesh dynamics.
+
+    \item \textbf{Diffusion learns holistically}: By learning to denoise at all noise levels, the model captures spatial coherence, temporal smoothness, and physical constraints implicitly.
+
+    \item \textbf{Augmentation is built-in}: The partial denoising trick provides controllable augmentation without any modification to the model.
+
+    \item \textbf{GNNs respect structure}: Graph neural networks naturally handle irregular mesh topology.
+\end{enumerate}
+
+\section{Next Steps}
+
+\begin{enumerate}
+    \item Implement the trajectory diffusion model (PyTorch + PyTorch Geometric)
+    \item Train on flag simulation data (DeepMind MeshGraphNets dataset)
+    \item Evaluate generation quality and augmentation effectiveness
+    \item Apply to other mesh simulation domains
+\end{enumerate}
+
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem{ddpm}
+Ho, J., Jain, A., \& Abbeel, P. (2020).
+Denoising Diffusion Probabilistic Models.
+\textit{NeurIPS}.
+
+\bibitem{meshgraphnets}
+Pfaff, T., Fortunato, M., Sanchez-Gonzalez, A., \& Battaglia, P. W. (2021).
+Learning Mesh-Based Simulation with Graph Networks.
+\textit{ICLR}.
+
+\bibitem{shuman}
+Shuman, D. I., et al. (2013).
+The Emerging Field of Signal Processing on Graphs.
+\textit{IEEE Signal Processing Magazine}.
+
+\bibitem{sdedit}
+Meng, C., et al. (2022).
+SDEdit: Guided Image Synthesis and Editing with Stochastic Differential Equations.
+\textit{ICLR}.
+
+\end{thebibliography}
+
+\end{document}
