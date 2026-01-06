@@ -1,16 +1,16 @@
 @echo off
-REM Setup script for Graph Deep Fakes on FEA Simulations
-REM Windows version
+REM Setup and train trajectory diffusion model for flag data
+REM Windows version (CPU - for GPU use setup_gpu.sh on Linux)
 
 echo ==============================================
-echo Graph Deep Fakes - Environment Setup
+echo Flag Trajectory Diffusion - Setup and Train
 echo ==============================================
 
 set VENV_NAME=gdf_env
 
 REM Check Python is available
 echo.
-echo [1/5] Checking Python installation...
+echo [1/6] Checking Python installation...
 python --version >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Python not found. Please install Python 3.8+.
@@ -18,60 +18,59 @@ if errorlevel 1 (
 )
 python --version
 
-REM Create virtual environment
+REM Create virtual environment if it doesn't exist
 echo.
-echo [2/5] Creating virtual environment '%VENV_NAME%'...
+echo [2/6] Setting up virtual environment '%VENV_NAME%'...
 if exist %VENV_NAME% (
-    echo   Virtual environment already exists. Removing old one...
-    rmdir /s /q %VENV_NAME%
+    echo   Virtual environment already exists, reusing it.
+) else (
+    echo   Creating new virtual environment...
+    python -m venv %VENV_NAME%
 )
-python -m venv %VENV_NAME%
-echo   Done.
 
 REM Activate virtual environment
 echo.
-echo [3/5] Activating virtual environment...
+echo [3/6] Activating virtual environment...
 call %VENV_NAME%\Scripts\activate.bat
 
 REM Upgrade pip
 echo.
-echo [4/5] Upgrading pip...
+echo [4/6] Upgrading pip and installing dependencies...
 pip install --upgrade pip --quiet
 
-REM Install dependencies
-echo.
-echo [5/5] Installing required packages...
-echo   Installing numpy...
-pip install numpy --quiet
-echo   Installing scipy...
-pip install scipy --quiet
-echo   Installing matplotlib...
-pip install matplotlib --quiet
-echo   Installing networkx...
-pip install networkx --quiet
-echo   Installing torch...
+echo   Installing PyTorch (CPU)...
 pip install torch --quiet
+
 echo   Installing torch-geometric...
 pip install torch-geometric --quiet
-echo   Installing meshio...
-pip install meshio --quiet
-echo   Installing gmsh (for mesh generation)...
-pip install gmsh --quiet
+
+echo   Installing TensorFlow (for data loading)...
+pip install tensorflow --quiet
+
+echo   Installing numpy, matplotlib, tqdm...
+pip install numpy matplotlib tqdm --quiet
+
+REM Download and prepare data
+echo.
+echo [5/6] Downloading and preparing flag data...
+python setup_flag_data.py
+if errorlevel 1 (
+    echo ERROR: Data setup failed.
+    exit /b 1
+)
+
+REM Train the model
+echo.
+echo [6/6] Training trajectory diffusion model...
+echo   (This will take a while on CPU - GPU recommended)
+echo.
+python train_flag_diffusion.py
 
 echo.
 echo ==============================================
-echo Environment setup complete!
+echo Training complete!
 echo ==============================================
 echo.
-echo To activate the environment manually:
-echo   %VENV_NAME%\Scripts\activate.bat
+echo Output saved to: flag_diffusion_output\
 echo.
-echo Running simulation...
-echo.
-
-REM Run the simulation
-python run_simulation.py
-
-echo.
-echo Done! Check the generated images.
 pause
