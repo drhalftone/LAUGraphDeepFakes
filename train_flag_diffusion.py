@@ -933,9 +933,10 @@ def main():
     ).to(cfg.device)
 
     # Compile model for faster execution (PyTorch 2.0+)
-    if hasattr(torch, 'compile'):
-        print("  Compiling model with torch.compile()...")
-        model = torch.compile(model)
+    # Disabled: Triton not supported on Windows
+    # if hasattr(torch, 'compile'):
+    #     print("  Compiling model with torch.compile()...")
+    #     model = torch.compile(model)
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"  Parameters: {num_params:,}")
