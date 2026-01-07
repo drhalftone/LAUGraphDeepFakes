@@ -47,13 +47,13 @@ REM ---------------------------------------------------------------
 REM Step 3: Install dependencies
 REM ---------------------------------------------------------------
 echo [3/6] Installing dependencies...
-pip install --upgrade pip --quiet
+python -m pip install --upgrade pip --quiet
 
 REM Check if PyTorch is already installed with CUDA
 python -c "import torch; assert torch.cuda.is_available()" >nul 2>&1
 if errorlevel 1 (
     echo   Installing PyTorch with CUDA 12.1...
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+    python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ) else (
     echo   PyTorch with CUDA already installed, skipping.
 )
@@ -62,7 +62,7 @@ REM Check if torch_geometric is installed
 python -c "import torch_geometric" >nul 2>&1
 if errorlevel 1 (
     echo   Installing torch-geometric...
-    pip install torch-geometric
+    python -m pip install torch-geometric
 ) else (
     echo   torch-geometric already installed, skipping.
 )
@@ -71,14 +71,14 @@ REM Check if TensorFlow is installed
 python -c "import tensorflow" >nul 2>&1
 if errorlevel 1 (
     echo   Installing TensorFlow...
-    pip install tensorflow
+    python -m pip install tensorflow
 ) else (
     echo   TensorFlow already installed, skipping.
 )
 
 REM Install remaining dependencies (fast, always run)
 echo   Installing numpy, matplotlib, tqdm...
-pip install numpy matplotlib tqdm --quiet
+python -m pip install numpy matplotlib tqdm --quiet
 echo.
 
 REM ---------------------------------------------------------------

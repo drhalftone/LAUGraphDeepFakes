@@ -1,29 +1,47 @@
-# Graph Deep Fakes for FEA Simulations
+# Graph Deep Fakes for Mesh Simulations
 
-Generate synthetic FEA (Finite Element Analysis) signals on meshes using graph neural networks and diffusion models.
+Generate synthetic graph signals on meshes using GNN-based diffusion models. Train on simulation data (e.g., cloth/flag dynamics) and generate new realistic samples or augment existing ones.
 
 ## Overview
 
-This project trains a generative model to create "deep fake" FEA fields on a fixed mesh. The approach:
+This project trains a diffusion model to generate "deep fake" mesh signals. The approach:
 
-1. **Graph Signal Processing**: Treat the FEA mesh as a graph with the cotangent-weighted Laplacian
-2. **Spectral Graph VAE**: Compress high-dimensional fields (~6500 nodes) to a low-dimensional latent space (~64 dims)
-3. **Graph-Aware Diffusion (GAD)**: Train a diffusion model with polynomial graph filters on the latent space
-4. **Generation**: Sample new latent codes and decode to synthetic FEA fields
+1. **Single-Frame Training**: Treat each simulation frame as an independent graph signal (V vertices × 3 coords)
+2. **GNN Encoder/Decoder**: Message-passing networks with edge features for direction-aware processing
+3. **DDPM Diffusion**: Standard denoising diffusion with cosine noise schedule
+4. **Augmentation**: Generate variations of real signals via partial denoising
 
-## Quick Start (GPU)
+## Quick Start
+
+### Windows (GPU)
+
+```cmd
+git clone git@github.com:drhalftone/LAUGraphDeepFakes.git
+cd LAUGraphDeepFakes
+setup_gpu.bat
+```
+
+### Linux (GPU)
 
 ```bash
 git clone git@github.com:drhalftone/LAUGraphDeepFakes.git
 cd LAUGraphDeepFakes
 chmod +x setup_gpu.sh && ./setup_gpu.sh
-source gdf_gpu/bin/activate
-python train_model.py
+source gdf_env/bin/activate
+python train_flag_diffusion.py
 ```
+
+The setup script:
+- Creates virtual environment `gdf_env`
+- Installs PyTorch with CUDA, torch-geometric, TensorFlow
+- Downloads ~1GB flag simulation data
+- Starts training
+
+Skips any steps already completed (safe to re-run).
 
 ## Requirements
 
-- Python 3.11 or 3.12 (PyTorch requirement)
+- Python 3.10+
 - NVIDIA GPU with CUDA support (recommended)
 - ~4GB disk space
 
@@ -31,30 +49,28 @@ python train_model.py
 
 ```
 LAUGraphDeepFakes/
-├── dataset/                    # FEA training data (heat equation)
-├── flag_data/                  # Flag simulation data (downloaded by setup script)
-├── docs/                       # Documentation and notes
-│   ├── graph_signal_diffusion.md # Main diffusion approach (START HERE)
-│   ├── spectral_vae_augmentation.md
-│   └── graph_signal_augmentation.md
-├── reports/                    # LaTeX reports
+├── flag_data/                  # Flag simulation data (downloaded by setup)
+├── flag_diffusion_output/      # Training output (models, visualizations)
+├── docs/
+│   └── graph_signal_diffusion.md  # Detailed architecture docs (START HERE)
+├── reports/
 │   └── diffusion_for_graph_signals.tex
-├── setup_flag_data.py         # Download & prepare flag data (run first)
-├── train_flag_diffusion.py    # Train trajectory diffusion model
-├── train_model.py             # Original VAE+Diffusion for FEA
-├── train_spectral_vae.py      # Spectral VAE approach
-├── load_flag_data.py          # Load DeepMind flag data (used by setup)
-├── generate_flag_noise.py     # Noise filtering baseline
-└── setup_gpu.sh               # GPU environment setup
+├── setup_gpu.bat              # Windows: setup + train (one command)
+├── setup_gpu.sh               # Linux: setup + train
+├── setup_flag_data.py         # Download & prepare flag data
+├── train_flag_diffusion.py    # Main training script
+├── dataset/                   # FEA data (legacy)
+├── train_model.py             # VAE+Diffusion for FEA (legacy)
+└── train_spectral_vae.py      # Spectral VAE (legacy)
 ```
 
 ## Current Approach: Graph Signal Diffusion
 
-See **[docs/graph_signal_diffusion.md](docs/graph_signal_diffusion.md)** for the approach using diffusion models with GNNs for graph signal generation.
+See **[docs/graph_signal_diffusion.md](docs/graph_signal_diffusion.md)** for full details.
 
 **Key insight**: Diffusion models support data augmentation by controlling noise injection level - start denoising from an intermediate step to generate signals similar to the original.
 
-### Quick Start (Flag Diffusion)
+### Manual Setup
 
 ```bash
 # 1. Setup data (downloads ~1GB, converts to numpy)
@@ -66,134 +82,92 @@ python train_flag_diffusion.py
 
 Output goes to `flag_diffusion_output/`.
 
-## Setup Options
+## Model Architecture
 
-### GPU Setup (Recommended)
+### GNN Diffusion Model (~534K parameters)
 
-For machines with NVIDIA GPU (tested on RTX 4070 Ti Super):
-
-```bash
-chmod +x setup_gpu.sh
-./setup_gpu.sh
-source gdf_gpu/bin/activate
+```
+Input: noisy frame (V, 3) + noise step n
+                ↓
+        [Input Projection]
+                ↓
+        [GNN Encoder × 4 layers]  ←── edge features (direction + length)
+                ↓
+        [+ Timestep Embedding]
+                ↓
+        [GNN Decoder × 4 layers]  ←── edge features
+                ↓
+        [Output Projection]
+                ↓
+Output: predicted noise (V, 3)
 ```
 
-### CPU Setup
+### Key Components
 
-For machines without GPU:
+| Component | Description |
+|-----------|-------------|
+| **MeshConv** | Message-passing with edge features `[x_i, x_j, edge_attr]` |
+| **Edge features** | Direction vector (dx, dy, dz) + length - enables direction awareness like CNN kernels |
+| **Timestep embedding** | Sinusoidal encoding of diffusion step |
+| **Residual connections** | Skip connections in encoder/decoder |
 
-```bash
-chmod +x setup.sh
-./setup.sh
-source gdf_env/bin/activate
-```
+### Diffusion
 
-Note: CPU training will be significantly slower.
-
-### Conda Setup
-
-If you prefer conda:
-
-```bash
-conda create -n gdf python=3.11 pytorch torchvision -c pytorch
-conda activate gdf
-pip install numpy scipy matplotlib scikit-learn jupyter
-```
-
-## Usage
-
-### Train the Model
-
-**Command line:**
-```bash
-python train_model.py
-```
-
-**Jupyter notebook:**
-```bash
-jupyter notebook
-# Open train_model.ipynb
-```
-
-This will:
-- Load the pre-generated dataset (49 FEA solutions)
-- Train a Graph VAE (~500 epochs)
-- Train a Graph-Aware Diffusion model (~800 epochs)
-- Generate synthetic samples
-- Save visualizations to `training_output/`
-
-Expected training time:
-- GPU (RTX 4070 Ti): ~15-25 minutes
-- CPU: ~2-4 hours
-
-### Generate New Dataset
-
-To regenerate the FEA dataset with different parameters:
-
-```bash
-python generate_dataset.py
-```
-
-Configurable parameters in the script:
-- `DIFFUSIVITY_VALUES`: Thermal conductivity range (default: 7 values from 0.1 to 10.0)
-- `SOURCE_VALUES`: Heat source strength range (default: 7 values from 0.5 to 7.0)
-- `MESH_RESOLUTION`: Mesh density
-
-### Run Single Simulation
-
-To visualize a single FEA simulation:
-
-```bash
-python run_simulation.py
-```
+- **Schedule**: Cosine (1000 steps)
+- **Training**: Predict noise ε from noisy signal x_n
+- **Generation**: Iterative denoising from pure noise
+- **Augmentation**: Start from real signal + partial noise
 
 ## Output Files
 
-After training, `training_output/` contains:
+After training, `flag_diffusion_output/` contains:
 
 | File | Description |
 |------|-------------|
-| `models_final.pt` | Trained VAE + Diffusion checkpoint |
-| `synthetic_samples.npz` | Generated synthetic fields |
-| `synthetic_samples.png` | Visualization of generated fields |
-| `real_vs_synthetic.png` | Comparison of real vs generated |
-| `training_curves.png` | Loss curves |
-| `fcps_schedule.png` | FCPS vs linear noise schedule |
-| `latent_space.png` | PCA of latent space |
+| `best_model.pt` | Best checkpoint (lowest validation loss) |
+| `checkpoint_epoch*.pt` | Periodic checkpoints |
+| `training_curves.png` | Loss curves (linear + log scale) |
+| `epoch_progression.png` | Generation quality over training |
+| `comparison_epoch*.png` | Real vs generated vs augmented |
 
-## Model Architecture
+## Dataset: Flag Simulation
 
-### Graph VAE
-- **Encoder**: Projects fields to spectral domain via Laplacian eigenvectors, then to latent space
-- **Decoder**: Reconstructs fields from latent codes using spectral coefficients
-- **Latent dim**: 64
+From DeepMind's MeshGraphNets:
 
-### Graph-Aware Diffusion (GAD)
-- **Schedule**: Floor Constrained Polynomial Schedule (FCPS)
-- **Denoiser**: Polynomial graph filter H(S) = Σ θ_k S^k
-- **Steps**: 100
-- **Operates on**: 64-dim latent space (not full mesh)
+| Property | Value |
+|----------|-------|
+| Trajectories | 100 |
+| Frames per trajectory | 401 |
+| **Total training samples** | **40,100 frames** |
+| Vertices per frame | 1,579 |
+| Mesh triangles | 3,028 |
+| Data size | ~725 MB (numpy) |
 
-Based on: [arXiv:2510.05036](https://arxiv.org/abs/2510.05036)
+Each frame is treated as an independent sample: `(1579, 3)` vertex positions.
 
-## Dataset Details
+## Training
 
-The included dataset contains 49 steady-state heat equation solutions:
+Default configuration:
 
-- **Mesh**: 6,523 nodes, 12,589 triangular elements
-- **Domain**: Rectangular region with circular obstacle (cylinder at origin)
-- **Parameters varied**:
-  - Diffusivity (k): 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0
-  - Source strength (Q): 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0
+| Setting | Value |
+|---------|-------|
+| Epochs | 100 |
+| Batch size | 32 |
+| Learning rate | 1e-4 |
+| Hidden dim | 128 |
+| GNN layers | 4 encoder + 4 decoder |
+
+Expected time on RTX 4070 Ti: **~25-50 minutes**
 
 ## References
 
-This project was inspired by:
-- Graph Signal Processing on meshes
-- Spectral mesh processing and manifold harmonics
-- Graph-Aware Diffusion (GAD) for signal generation ([arXiv:2510.05036](https://arxiv.org/abs/2510.05036))
+- [DDPM](https://arxiv.org/abs/2006.11239) - Denoising Diffusion Probabilistic Models (Ho et al., 2020)
+- [Improved DDPM](https://arxiv.org/abs/2102.09672) - Cosine schedule (Nichol & Dhariwal, 2021)
+- [SDEdit](https://arxiv.org/abs/2108.01073) - Partial denoising for augmentation (Meng et al., 2022)
+- [MeshGraphNets](https://arxiv.org/abs/2010.03409) - Edge features for mesh processing (Pfaff et al., 2021)
+- [GAD](https://arxiv.org/abs/2510.05036) - Graph-Aware Diffusion (alternative approach included for comparison)
 
-See the `docs/` folder for detailed documentation and the `reports/` folder for LaTeX reports.
+See `docs/` for detailed documentation and `reports/` for LaTeX reports.
 
 ## License
 
