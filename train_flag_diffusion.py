@@ -624,13 +624,15 @@ class FlagFrameDataset(Dataset):
         Args:
             frames: (N, V, 3) individual frames
         """
-        # Normalize
-        self.mean = frames.mean()
-        self.std = frames.std() + 1e-8
-        frames = (frames - self.mean) / self.std
+        # Normalize to [-1, 1] range (like RGB images)
+        # This is critical for DDPM which expects data in this range
+        self.data_min = frames.min()
+        self.data_max = frames.max()
+        frames = 2 * (frames - self.data_min) / (self.data_max - self.data_min) - 1
 
         self.frames = torch.tensor(frames, dtype=torch.float32)
         print(f"Dataset: {len(self)} frames, {frames.shape[1]} vertices")
+        print(f"  Normalized to [-1, 1] (raw range: [{self.data_min:.3f}, {self.data_max:.3f}])")
 
     def __len__(self):
         return len(self.frames)
@@ -639,7 +641,8 @@ class FlagFrameDataset(Dataset):
         return self.frames[idx]
 
     def denormalize(self, x):
-        return x * self.std + self.mean
+        """Convert from [-1, 1] back to original range."""
+        return (x + 1) / 2 * (self.data_max - self.data_min) + self.data_min
 
 
 # =============================================================================
@@ -977,8 +980,8 @@ def main():
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'val_loss': val_loss,
-                'mean': train_dataset.mean,
-                'std': train_dataset.std,
+                'data_min': train_dataset.data_min,
+                'data_max': train_dataset.data_max,
             }, os.path.join(cfg.output_dir, 'best_model.pt'))
 
         # Checkpoint
