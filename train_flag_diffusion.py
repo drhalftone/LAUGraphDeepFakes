@@ -678,6 +678,94 @@ def compare_frames(real, generated, augmented, cells, save_path=None):
     plt.close()
 
 
+def plot_loss_live(train_losses, val_losses, save_path):
+    """Plot training curves and save (called during training)."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    epochs = range(1, len(train_losses) + 1)
+
+    # Linear scale
+    ax1.plot(epochs, train_losses, 'b-', label='Train', linewidth=2)
+    ax1.plot(epochs, val_losses, 'r-', label='Val', linewidth=2)
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Training Curves (Linear)')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # Log scale
+    ax2.semilogy(epochs, train_losses, 'b-', label='Train', linewidth=2)
+    ax2.semilogy(epochs, val_losses, 'r-', label='Val', linewidth=2)
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Loss (log scale)')
+    ax2.set_title('Training Curves (Log)')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+
+
+def plot_epoch_progression(progression_frames, epochs_recorded, cells, save_path):
+    """
+    Create a montage showing generation quality over epochs.
+
+    Args:
+        progression_frames: list of (V, 3) numpy arrays, one per recorded epoch
+        epochs_recorded: list of epoch numbers
+        cells: mesh triangles
+        save_path: where to save
+    """
+    n_frames = len(progression_frames)
+    if n_frames == 0:
+        return
+
+    # Determine grid size
+    cols = min(5, n_frames)
+    rows = (n_frames + cols - 1) // cols
+
+    fig = plt.figure(figsize=(4 * cols, 4 * rows))
+
+    for idx, (frame, epoch) in enumerate(zip(progression_frames, epochs_recorded)):
+        ax = fig.add_subplot(rows, cols, idx + 1, projection='3d')
+        ax.plot_trisurf(
+            frame[:, 0], frame[:, 1], frame[:, 2],
+            triangles=cells,
+            cmap='viridis',
+            alpha=0.8,
+            linewidth=0.1,
+            edgecolor='gray'
+        )
+        ax.set_title(f'Epoch {epoch}')
+        ax.view_init(elev=20, azim=45)
+        # Remove axis labels for cleaner look
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.set_zticklabels([])
+
+    plt.suptitle('Generation Quality Over Training (Fixed Seed)', fontsize=14)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    print(f"Saved: {save_path}")
+    plt.close()
+
+
+@torch.no_grad()
+def generate_with_seed(model, schedule, shape, seed, device):
+    """Generate a sample using a fixed seed for reproducibility."""
+    torch.manual_seed(seed)
+    if device == 'cuda':
+        torch.cuda.manual_seed(seed)
+
+    x = torch.randn(shape, device=device)
+
+    for n in reversed(range(schedule.num_steps)):
+        x = schedule.p_sample(model, x, n)
+
+    return x
+
+
 # =============================================================================
 # Training
 # =============================================================================
@@ -821,6 +909,11 @@ def main():
     val_losses = []
     best_val_loss = float('inf')
 
+    # For epoch progression visualization (fixed seed for consistency)
+    progression_seed = 42
+    progression_frames = []
+    epochs_recorded = []
+
     for epoch in range(1, cfg.num_epochs + 1):
         start = time.time()
 
@@ -854,16 +947,32 @@ def main():
                 'val_losses': val_losses,
             }, os.path.join(cfg.output_dir, f'checkpoint_epoch{epoch}.pt'))
 
-        # Sample
+        # Update loss plot every 5 epochs (live view of training progress)
+        if epoch % 5 == 0 or epoch == 1:
+            plot_loss_live(
+                train_losses, val_losses,
+                save_path=os.path.join(cfg.output_dir, 'training_curves.png')
+            )
+
+        # Sample and record for progression
         if epoch % cfg.sample_every == 0:
             print("  Generating samples...")
             model.eval()
 
-            # Generate from noise
-            generated = schedule.sample(model, (1, V, 3), device=cfg.device)
-            generated = train_dataset.denormalize(generated[0].cpu().numpy())
+            # Generate with fixed seed for progression montage
+            generated_tensor = generate_with_seed(
+                model, schedule, (1, V, 3), progression_seed, cfg.device
+            )
+            generated = train_dataset.denormalize(generated_tensor[0].cpu().numpy())
 
-            # Augment a real frame
+            # Store for progression montage
+            progression_frames.append(generated.copy())
+            epochs_recorded.append(epoch)
+
+            # Also generate a random sample and augmentation for comparison
+            random_generated = schedule.sample(model, (1, V, 3), device=cfg.device)
+            random_generated = train_dataset.denormalize(random_generated[0].cpu().numpy())
+
             real_frame = train_dataset.frames[0:1].to(cfg.device)
             augmented = schedule.augment(model, real_frame, start_step=500)
             augmented = train_dataset.denormalize(augmented[0].cpu().numpy())
@@ -871,21 +980,27 @@ def main():
             real = train_dataset.denormalize(train_dataset.frames[0].numpy())
 
             compare_frames(
-                real, generated, augmented, cells,
+                real, random_generated, augmented, cells,
                 save_path=os.path.join(cfg.output_dir, f'samples_epoch{epoch}.png')
             )
 
-    # Training curves
-    plt.figure(figsize=(10, 5))
-    plt.plot(train_losses, label='Train')
-    plt.plot(val_losses, label='Val')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training Curves')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(cfg.output_dir, 'training_curves.png'), dpi=150)
-    plt.close()
+            # Update progression montage
+            plot_epoch_progression(
+                progression_frames, epochs_recorded, cells,
+                save_path=os.path.join(cfg.output_dir, 'epoch_progression.png')
+            )
+
+    # Final training curves (both linear and log scale)
+    plot_loss_live(
+        train_losses, val_losses,
+        save_path=os.path.join(cfg.output_dir, 'training_curves.png')
+    )
+
+    # Final epoch progression montage
+    plot_epoch_progression(
+        progression_frames, epochs_recorded, cells,
+        save_path=os.path.join(cfg.output_dir, 'epoch_progression.png')
+    )
 
     print("\n" + "=" * 60)
     print("Training complete!")
