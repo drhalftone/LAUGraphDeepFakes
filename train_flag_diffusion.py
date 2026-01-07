@@ -247,25 +247,33 @@ class GraphSignalDiffusion(nn.Module):
         # Timestep embedding
         t_emb = self.time_embed(n)  # (B, D)
 
-        # Process batch
-        outputs = []
-        for b in range(B):
-            # Encode
-            h = self.input_proj(x[b])
-            for layer in self.encoder_layers:
-                h = h + layer(h, self.edge_index, self.edge_attr)
+        # Batch all nodes together: (B, V, 3) -> (B*V, 3)
+        x_flat = x.reshape(B * V, C)
 
-            # Add timestep
-            h = h + t_emb[b].unsqueeze(0)
+        # Create batched edge_index with node offsets for each sample
+        # This allows processing all batch items in a single GNN pass
+        offsets = torch.arange(B, device=x.device) * V
+        edge_index_b = torch.cat([
+            self.edge_index + offset for offset in offsets
+        ], dim=1)
+        edge_attr_b = self.edge_attr.repeat(B, 1)
 
-            # Decode
-            for layer in self.decoder_layers:
-                h = h + layer(h, self.edge_index, self.edge_attr)
+        # Encode (single pass for entire batch)
+        h = self.input_proj(x_flat)  # (B*V, D)
+        for layer in self.encoder_layers:
+            h = h + layer(h, edge_index_b, edge_attr_b)
 
-            out = self.output_proj(h)
-            outputs.append(out)
+        # Add timestep embedding (broadcast to each node in each sample)
+        h = h.reshape(B, V, -1)
+        h = h + t_emb.unsqueeze(1)  # (B, V, D)
+        h = h.reshape(B * V, -1)
 
-        return torch.stack(outputs)
+        # Decode (single pass for entire batch)
+        for layer in self.decoder_layers:
+            h = h + layer(h, edge_index_b, edge_attr_b)
+
+        out = self.output_proj(h)  # (B*V, 3)
+        return out.reshape(B, V, C)
 
 
 # =============================================================================
