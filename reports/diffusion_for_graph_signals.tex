@@ -305,6 +305,92 @@ python setup_flag_data.py      # Download and prepare data
 python train_flag_diffusion.py  # Train model
 \end{verbatim}
 
+\section{Relationship to Prior Work}
+
+This work combines several established methods. We explicitly document the provenance of each component to clarify that no novel algorithms are introduced---our contribution is the application of these methods to graph signal augmentation.
+
+\subsection{Component Attribution}
+
+\begin{center}
+\begin{tabular}{p{4cm}p{4cm}p{5cm}}
+\toprule
+\textbf{Our Component} & \textbf{Established Method} & \textbf{Reference} \\
+\midrule
+Forward/reverse diffusion process & DDPM & Ho et al.~\cite{ddpm} \\
+Cosine noise schedule & Improved DDPM & Nichol \& Dhariwal~\cite{iddpm} \\
+Partial denoising for augmentation & SDEdit & Meng et al.~\cite{sdedit} \\
+Message passing with edge features & MeshGraphNets / MPNN & Pfaff et al.~\cite{meshgraphnets}, Gilmer et al.~\cite{mpnn} \\
+Sinusoidal timestep embedding & Transformer / DDPM & Vaswani et al., Ho et al.~\cite{ddpm} \\
+Graph Laplacian analysis & Graph Signal Processing & Shuman et al.~\cite{shuman} \\
+Heat equation forward process & GAD & Rozada et al.~\cite{gad} \\
+Polynomial graph filters & GAD / Spectral GNNs & Rozada et al.~\cite{gad} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{How We Use Each Method}
+
+\subsubsection{DDPM (Ho et al., 2020)}
+We use the standard DDPM formulation unchanged:
+\begin{itemize}
+    \item Forward process: $\mathbf{x}_n = \sqrt{\bar{\alpha}_n} \mathbf{x}_0 + \sqrt{1-\bar{\alpha}_n} \boldsymbol{\epsilon}$
+    \item Training objective: $\mathcal{L} = \mathbb{E}[\|\boldsymbol{\epsilon} - \boldsymbol{\epsilon}_\theta(\mathbf{x}_n, n)\|^2]$
+    \item Reverse sampling: iterative denoising from $n=N$ to $n=0$
+\end{itemize}
+The only difference is that our signal $\mathbf{x} \in \mathbb{R}^{V \times 3}$ is a graph signal rather than an image.
+
+\subsubsection{Improved DDPM / Cosine Schedule (Nichol \& Dhariwal, 2021)}
+We use the cosine schedule exactly as proposed:
+\begin{equation}
+    \bar{\alpha}_n = \frac{f(n)}{f(0)}, \quad f(t) = \cos\left(\frac{t/N + s}{1+s} \cdot \frac{\pi}{2}\right)^2
+\end{equation}
+with $s = 0.008$. This provides smoother noise progression than linear schedules.
+
+\subsubsection{SDEdit (Meng et al., 2022)}
+Our augmentation procedure is SDEdit applied to graph signals:
+\begin{enumerate}
+    \item Start with real signal $\mathbf{x}_0$
+    \item Add noise to intermediate step $n^*$: $\mathbf{x}_{n^*} = \sqrt{\bar{\alpha}_{n^*}} \mathbf{x}_0 + \sqrt{1-\bar{\alpha}_{n^*}} \boldsymbol{\epsilon}$
+    \item Denoise from $n^*$ back to 0
+\end{enumerate}
+This is identical to SDEdit's ``img2img'' procedure, substituting graph signals for images.
+
+\subsubsection{MeshGraphNets / MPNN (Pfaff et al., 2021; Gilmer et al., 2017)}
+Our GNN denoiser uses the standard message passing framework:
+\begin{equation}
+    m_{j \to i} = \phi_e(h_i, h_j, \mathbf{e}_{ij}), \quad h_i' = \phi_v\left(h_i, \sum_{j \in \mathcal{N}(i)} m_{j \to i}\right)
+\end{equation}
+where $\phi_e$ and $\phi_v$ are MLPs. Edge features $\mathbf{e}_{ij} = [\mathbf{p}_j - \mathbf{p}_i, \|\mathbf{p}_j - \mathbf{p}_i\|]$ encode relative positions, exactly as in MeshGraphNets.
+
+\subsubsection{GAD (Rozada et al., 2025)}
+For comparison, we implement GAD's approach:
+\begin{itemize}
+    \item Heat equation forward process on the graph Laplacian
+    \item Polynomial graph filter denoiser: $H(\mathbf{L}) = \sum_k \theta_k \mathbf{L}^k$
+\end{itemize}
+
+\subsection{What Is Not Novel}
+
+To be explicit, we do \textbf{not} claim novelty for:
+\begin{itemize}
+    \item The diffusion framework (DDPM)
+    \item The noise schedule (Improved DDPM)
+    \item The partial denoising augmentation strategy (SDEdit)
+    \item The message passing architecture (MPNN/MeshGraphNets)
+    \item The graph signal processing perspective (Shuman et al.)
+\end{itemize}
+
+\subsection{Our Contribution}
+
+Our contribution is \textbf{applying} these established methods to:
+\begin{enumerate}
+    \item Generate realistic graph signals on fixed meshes
+    \item Provide controllable data augmentation for training physics-based GNNs
+    \item Compare isotropic (DDPM) vs graph-aware (GAD) forward processes
+\end{enumerate}
+
+This is an \textbf{application paper}, demonstrating that standard diffusion techniques transfer effectively to the graph signal domain.
+
 \section{Summary}
 
 \begin{enumerate}
@@ -328,6 +414,16 @@ python train_flag_diffusion.py  # Train model
 Ho, J., Jain, A., \& Abbeel, P. (2020).
 Denoising Diffusion Probabilistic Models.
 \textit{NeurIPS}.
+
+\bibitem{iddpm}
+Nichol, A. \& Dhariwal, P. (2021).
+Improved Denoising Diffusion Probabilistic Models.
+\textit{ICML}.
+
+\bibitem{mpnn}
+Gilmer, J., Schoenholz, S. S., Riley, P. F., Vinyals, O., \& Dahl, G. E. (2017).
+Neural Message Passing for Quantum Chemistry.
+\textit{ICML}.
 
 \bibitem{gad}
 Rozada, S., et al. (2025).
