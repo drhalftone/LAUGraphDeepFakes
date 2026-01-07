@@ -34,7 +34,7 @@ LAUGraphDeepFakes/
 ├── dataset/                    # FEA training data (heat equation)
 ├── flag_data/                  # Flag simulation data (downloaded by setup script)
 ├── docs/                       # Documentation and notes
-│   ├── trajectory_diffusion.md # Main diffusion approach (START HERE)
+│   ├── graph_signal_diffusion.md # Main diffusion approach (START HERE)
 │   ├── spectral_vae_augmentation.md
 │   └── graph_signal_augmentation.md
 ├── reports/                    # LaTeX reports
@@ -48,11 +48,11 @@ LAUGraphDeepFakes/
 └── setup_gpu.sh               # GPU environment setup
 ```
 
-## Current Approach: Trajectory Diffusion
+## Current Approach: Graph Signal Diffusion
 
-See **[docs/trajectory_diffusion.md](docs/trajectory_diffusion.md)** for the latest approach using diffusion models with GNNs for mesh trajectory generation.
+See **[docs/graph_signal_diffusion.md](docs/graph_signal_diffusion.md)** for the approach using diffusion models with GNNs for graph signal generation.
 
-**Key insight**: Diffusion models support data augmentation by controlling noise injection level - add less noise to stay closer to the original signal.
+**Key insight**: Diffusion models support data augmentation by controlling noise injection level - start denoising from an intermediate step to generate signals similar to the original.
 
 ### Quick Start (Flag Diffusion)
 
