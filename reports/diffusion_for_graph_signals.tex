@@ -8,7 +8,7 @@
 \usepackage{hyperref}
 \usepackage{xcolor}
 
-\title{Diffusion Models for Graph Signal Augmentation:\\From Noise to Realistic Mesh Dynamics}
+\title{Diffusion Models for Graph Signal Generation and Augmentation}
 \author{Technical Report}
 \date{\today}
 
@@ -17,13 +17,13 @@
 \maketitle
 
 \begin{abstract}
-This report describes the application of diffusion models to generate realistic graph signals on fixed meshes. We motivate the approach by examining the limitations of simpler methods (spectral filtering, VAEs), then develop a graph neural network-based diffusion model for trajectory generation. A key insight is that the diffusion framework naturally supports data augmentation by controlling the noise injection level, allowing generation of signals that are ``similar but not identical'' to training examples.
+This report describes the application of diffusion models to generate realistic graph signals on fixed meshes. We develop two approaches: (1) a GNN-based denoiser with edge features for direction-aware message passing, and (2) a Graph-Aware Diffusion (GAD) approach using heat equation dynamics on the graph Laplacian. A key insight is that the diffusion framework naturally supports data augmentation by controlling the noise injection level, allowing generation of signals that are ``similar but not identical'' to training examples.
 \end{abstract}
 
 \section{Introduction and Motivation}
 
 \subsection{The Problem}
-Given a set of graph signals defined on a fixed mesh (e.g., simulation results from finite element analysis or physics simulations), we want to generate new signals that:
+Given a set of graph signals defined on a fixed mesh (e.g., vertex positions from physics simulations), we want to generate new signals that:
 \begin{enumerate}
     \item Look realistic (could plausibly come from the same physical process)
     \item Are diverse (not identical to training examples)
@@ -31,223 +31,238 @@ Given a set of graph signals defined on a fixed mesh (e.g., simulation results f
 \end{enumerate}
 
 \subsection{Use Case: Data Augmentation}
-The primary application is \textbf{data augmentation} for training other graph neural networks. When real simulation data is expensive to generate, we want to:
+The primary application is \textbf{data augmentation} for training graph neural networks. When real simulation data is expensive to generate, we want to:
 \begin{itemize}
     \item Take a small set of real examples
     \item Generate many similar-but-different variations
     \item Use these to augment training data
 \end{itemize}
 
-\section{Methods We Explored}
-
-\subsection{Approach 1: Spectral Noise Filtering}
-
-\subsubsection{Method}
-The idea was to use the Windowed Graph Fourier Transform (following Shuman et al.) to:
-\begin{enumerate}
-    \item Compute the spectral envelope $|S(v, \lambda)|$ of a real signal
-    \item Generate white noise in the spectral domain
-    \item Filter the noise with the spectral envelope
-    \item Inverse transform to get a new signal
-\end{enumerate}
-
-\subsubsection{Result}
-This approach failed to capture:
+\subsection{Training Data}
+We use DeepMind's flag simulation dataset (MeshGraphNets):
 \begin{itemize}
-    \item \textbf{Boundary conditions}: Fixed vertices (e.g., flag pole) moved freely
-    \item \textbf{Spatial coherence}: Nearby vertices should move together
-    \item \textbf{Temporal smoothness}: Generated motion was too jittery
+    \item 50 simulations $\times$ 401 timesteps = \textbf{20,050 training frames}
+    \item Each frame: 1,579 vertices $\times$ 3 coordinates (xyz positions)
+    \item Fixed mesh connectivity: 3,028 triangles
 \end{itemize}
 
-The spectral envelope captures only marginal statistics, not the joint structure.
+Each frame is treated as an independent graph signal $\mathbf{x} \in \mathbb{R}^{V \times 3}$.
+
+\section{Methods We Explored (and Why They Failed)}
+
+\subsection{Approach 1: Spectral Noise Filtering}
+Filter white noise with the spectral envelope of real signals.
+
+\textbf{Result}: Failed to capture boundary conditions (fixed pole moved freely), spatial coherence, and produced jittery outputs.
 
 \subsection{Approach 2: Spectral VAE}
+Variational autoencoder operating in the graph Fourier domain.
 
-\subsubsection{Method}
-A variational autoencoder operating in the spectral domain:
-\begin{equation}
-    x \xrightarrow{\text{GFT}} \hat{x} \xrightarrow{\text{Encoder}} \mu, \sigma \xrightarrow{z = \mu + \sigma \cdot \epsilon} \xrightarrow{\text{Decoder}} \hat{x}' \xrightarrow{\text{IGFT}} x'
-\end{equation}
-
-Noise is injected in the latent space via the reparameterization trick.
-
-\subsubsection{Result}
-On steady-state FEA data (heat equation solutions), the VAE produced outputs nearly identical to inputs. The training data lacked diversity---all signals were smooth heat distributions varying only in parameters.
-
-\textbf{Key insight}: Generative models need diverse training data to learn meaningful variation.
+\textbf{Result}: On FEA data, outputs were nearly identical to inputs. Training data lacked diversity---generative models need varied examples to learn meaningful variation.
 
 \section{Diffusion Models: The Solution}
 
 \subsection{Why Diffusion?}
-Diffusion models are the current state-of-the-art for generative AI (Stable Diffusion, DALL-E 3, Sora). They:
+Diffusion models (Stable Diffusion, DALL-E 3) are state-of-the-art for generation because they:
 \begin{itemize}
     \item Learn implicit constraints from data
     \item Generate high-quality, diverse outputs
-    \item Handle high-dimensional data naturally
-    \item Support controllable generation
+    \item Support \textbf{controllable augmentation} via partial denoising
 \end{itemize}
 
 \subsection{The Diffusion Process}
 
 \subsubsection{Forward Process (Adding Noise)}
-Given a clean signal $x_0$, we progressively add Gaussian noise:
+Given a clean signal $\mathbf{x}_0$, progressively add Gaussian noise:
 \begin{equation}
-    x_n = \sqrt{\bar{\alpha}_n} \, x_0 + \sqrt{1 - \bar{\alpha}_n} \, \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)
+    \mathbf{x}_n = \sqrt{\bar{\alpha}_n} \, \mathbf{x}_0 + \sqrt{1 - \bar{\alpha}_n} \, \boldsymbol{\epsilon}, \quad \boldsymbol{\epsilon} \sim \mathcal{N}(0, I)
 \end{equation}
-where $\bar{\alpha}_n = \prod_{i=1}^{n} \alpha_i$ is the cumulative noise schedule, and $n$ is the \textbf{noise step} (not to be confused with simulation time $t$).
+where $\bar{\alpha}_n = \prod_{i=1}^{n} \alpha_i$ is the cumulative noise schedule, and $n$ is the \textbf{noise step}.
 
-At $n = 0$: signal is clean ($x_0$).\\
-At $n = N$: signal is pure noise ($x_N \approx \mathcal{N}(0, I)$).
+At $n = 0$: signal is clean. At $n = N$: signal is pure noise.
 
 \subsubsection{Reverse Process (Denoising)}
-A neural network $\epsilon_\theta$ learns to predict the noise:
+A neural network $\boldsymbol{\epsilon}_\theta$ learns to predict the noise:
 \begin{equation}
-    \hat{\epsilon} = \epsilon_\theta(x_n, n)
+    \hat{\boldsymbol{\epsilon}} = \boldsymbol{\epsilon}_\theta(\mathbf{x}_n, n)
 \end{equation}
 
-Given $\hat{\epsilon}$, we can estimate the clean signal and take a denoising step.
-
 \subsubsection{Training}
-\begin{algorithm}
+\begin{algorithm}[H]
 \caption{Diffusion Training}
 \begin{algorithmic}[1]
 \Repeat
-    \State Sample $x_0 \sim$ training data
+    \State Sample $\mathbf{x}_0 \sim$ training data (single frame)
     \State Sample $n \sim \text{Uniform}(1, N)$
-    \State Sample $\epsilon \sim \mathcal{N}(0, I)$
-    \State $x_n \gets \sqrt{\bar{\alpha}_n} \, x_0 + \sqrt{1 - \bar{\alpha}_n} \, \epsilon$
-    \State Gradient step on $\|\epsilon - \epsilon_\theta(x_n, n)\|^2$
+    \State Sample $\boldsymbol{\epsilon} \sim \mathcal{N}(0, I)$
+    \State $\mathbf{x}_n \gets \sqrt{\bar{\alpha}_n} \, \mathbf{x}_0 + \sqrt{1 - \bar{\alpha}_n} \, \boldsymbol{\epsilon}$
+    \State Gradient step on $\|\boldsymbol{\epsilon} - \boldsymbol{\epsilon}_\theta(\mathbf{x}_n, n)\|^2$
 \Until{converged}
-\end{algorithmic}
-\end{algorithm}
-
-\subsubsection{Generation}
-\begin{algorithm}
-\caption{Diffusion Generation}
-\begin{algorithmic}[1]
-\State $x_N \sim \mathcal{N}(0, I)$ \Comment{Start from pure noise}
-\For{$n = N, N-1, \ldots, 1$}
-    \State $\hat{\epsilon} \gets \epsilon_\theta(x_n, n)$
-    \State $x_{n-1} \gets \text{DenoisingStep}(x_n, \hat{\epsilon}, n)$
-\EndFor
-\State \Return $x_0$ \Comment{Clean generated signal}
 \end{algorithmic}
 \end{algorithm}
 
 \section{Key Insight: Augmentation via Partial Denoising}
 
-\subsection{The ``img2img'' Trick}
-Instead of starting from pure noise, we can:
-\begin{enumerate}
-    \item Take a \textbf{real} signal $x_0$
-    \item Add noise to an \textbf{intermediate} level $n^*$
-    \item Denoise from $n^*$ down to $0$
-\end{enumerate}
+Instead of starting from pure noise ($n = N$), start from a \textbf{real signal with added noise}:
 
-This produces a signal that is a \textbf{variation} of the original.
-
-\begin{algorithm}
+\begin{algorithm}[H]
 \caption{Signal Augmentation via Partial Denoising}
 \begin{algorithmic}[1]
-\State \textbf{Input:} Real signal $x_0$, starting noise step $n^*$
-\State Sample $\epsilon \sim \mathcal{N}(0, I)$
-\State $x_{n^*} \gets \sqrt{\bar{\alpha}_{n^*}} \, x_0 + \sqrt{1 - \bar{\alpha}_{n^*}} \, \epsilon$
-\For{$n = n^*, n^*-1, \ldots, 1$}
-    \State $\hat{\epsilon} \gets \epsilon_\theta(x_n, n)$
-    \State $x_{n-1} \gets \text{DenoisingStep}(x_n, \hat{\epsilon}, n)$
+\State \textbf{Input:} Real signal $\mathbf{x}_0$, starting noise step $n^*$
+\State Sample $\boldsymbol{\epsilon} \sim \mathcal{N}(0, I)$
+\State $\mathbf{x}_{n^*} \gets \sqrt{\bar{\alpha}_{n^*}} \, \mathbf{x}_0 + \sqrt{1 - \bar{\alpha}_{n^*}} \, \boldsymbol{\epsilon}$
+\For{$n = n^*, n^*-1, \ldots, 1, 0$}
+    \State $\hat{\boldsymbol{\epsilon}} \gets \boldsymbol{\epsilon}_\theta(\mathbf{x}_n, n)$
+    \State $\mathbf{x}_{n-1} \gets \text{DenoisingStep}(\mathbf{x}_n, \hat{\boldsymbol{\epsilon}}, n)$
 \EndFor
-\State \Return $x_0$ \Comment{Augmented signal}
+\State \Return $\mathbf{x}_0$ \Comment{Augmented signal (similar to input)}
 \end{algorithmic}
 \end{algorithm}
 
 \subsection{Controlling Similarity}
-The starting noise step $n^*$ acts as a ``similarity dial'':
+The starting noise step $n^*$ controls how different the output is from the input:
 
 \begin{center}
 \begin{tabular}{lll}
 \toprule
-$n^*$ & Noise Added & Result \\
+$n^*$ & Noise Level & Result \\
 \midrule
-$N$ (e.g., 1000) & Maximum & Completely new signal \\
-$0.7N$ (e.g., 700) & High & Loosely similar to original \\
-$0.3N$ (e.g., 300) & Medium & Same structure, different details \\
-$0.1N$ (e.g., 100) & Low & Very close to original \\
-$0$ & None & Identical to input \\
+1000 & Maximum & Completely new signal \\
+700 & High & Loosely similar \\
+500 & Medium & Same structure, different details \\
+300 & Low & Very close to original \\
+0 & None & Identical to input \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\textbf{This is exactly the augmentation we originally wanted}: generate signals that are similar but not identical, with controllable similarity.
+\section{Two Denoiser Architectures}
 
-\section{Architecture for Mesh Data}
+We implement two approaches for comparison.
 
-\subsection{Why Graph Neural Networks?}
-Mesh data is not a regular grid, so standard convolutions don't apply. We use GNNs that:
-\begin{itemize}
-    \item Respect mesh connectivity (which vertices are neighbors)
-    \item Handle irregular topology
-    \item Encode spatial structure naturally
-\end{itemize}
+\subsection{Approach A: GNN with Edge Features (Ours)}
 
-\subsection{Model Architecture}
+\subsubsection{Edge Features for Direction Awareness}
+Standard GNN message passing treats all neighbors identically:
+\begin{equation}
+    h_i^{(l+1)} = h_i^{(l)} + \text{Aggregate}_{j \in \mathcal{N}(i)} \text{MLP}(h_i^{(l)}, h_j^{(l)})
+\end{equation}
 
-For trajectory data $(T \times V \times 3)$ where $T$ is the number of simulation frames, $V$ is the number of vertices, and $3$ is the spatial dimension:
+This is \textbf{isotropic}---unlike CNN kernels which have different weights for different positions.
 
+We add \textbf{edge features} encoding the relative position of each neighbor:
+\begin{equation}
+    \mathbf{e}_{ij} = [\mathbf{p}_j - \mathbf{p}_i, \|\mathbf{p}_j - \mathbf{p}_i\|] \in \mathbb{R}^4
+\end{equation}
+where $\mathbf{p}_i, \mathbf{p}_j$ are vertex positions in the rest state.
+
+The message function becomes:
+\begin{equation}
+    m_{j \to i} = \text{MLP}(h_i, h_j, \mathbf{e}_{ij})
+\end{equation}
+
+This allows the network to learn \textbf{direction-dependent} filters, similar to CNN kernels.
+
+\subsubsection{Architecture}
 \begin{center}
 \begin{tabular}{ll}
 \toprule
-Component & Purpose \\
+Component & Description \\
 \midrule
-GNN Encoder & Process each frame, respecting mesh structure \\
-Temporal Transformer & Model dynamics across simulation time \\
-Noise Step Embedding & Condition on diffusion noise level $n$ \\
-GNN Decoder & Output denoised positions \\
+Input projection & Linear: $3 \to D$ \\
+Encoder & 4 MeshConv layers with residual connections \\
+Timestep embedding & Sinusoidal + MLP \\
+Decoder & 4 MeshConv layers with residual connections \\
+Output projection & Linear: $D \to 3$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\subsection{Message Passing on Meshes}
-The GNN uses message passing on mesh edges:
-\begin{equation}
-    h_i^{(l+1)} = h_i^{(l)} + \text{Aggregate}_{j \in \mathcal{N}(i)} \text{MLP}\left(h_i^{(l)}, h_j^{(l)}\right)
-\end{equation}
-where $\mathcal{N}(i)$ is the set of vertices connected to vertex $i$ by a mesh edge.
+Parameters: $\sim$1M. Hidden dimension $D = 128$.
 
-\section{Connection to Original Goals}
+\subsection{Approach B: Graph-Aware Diffusion (GAD)}
+
+Based on Rozada et al. (arXiv:2510.05036).
+
+\subsubsection{Graph-Aware Forward Process}
+Instead of isotropic Gaussian noise, GAD uses the \textbf{heat equation} on the graph:
+\begin{equation}
+    d\mathbf{x}_t = -c_t \mathbf{L}_\gamma \mathbf{x}_t \, dt + \sqrt{2 c_t} \sigma \, d\mathbf{w}_t
+\end{equation}
+where $\mathbf{L}$ is the graph Laplacian and $\mathbf{L}_\gamma = \mathbf{L} + \gamma \mathbf{I}$.
+
+Key property: Noise spreads along graph edges. Smooth signals (low graph frequency) decay slower than high-frequency signals.
+
+\subsubsection{Polynomial Graph Filter Denoiser}
+The denoiser is a polynomial in the Laplacian:
+\begin{equation}
+    H(\mathbf{L}) = \sum_{k=0}^{K} \theta_k \mathbf{L}^k
+\end{equation}
+
+Each power $\mathbf{L}^k$ captures $k$-hop neighborhoods. The learnable coefficients $\theta_k$ weight contributions from different hop distances.
+
+\subsection{Comparison}
 
 \begin{center}
-\begin{tabular}{p{5cm}p{7cm}}
+\begin{tabular}{lll}
 \toprule
-Original Goal & How Diffusion Achieves It \\
+Aspect & GNN + Edge Features & GAD \\
 \midrule
-Generate similar-but-different signals & Partial denoising with controllable $n^*$ \\
-Augment training data & Generate many variations from few examples \\
-Respect mesh structure & GNN encoder/decoder uses mesh connectivity \\
-Capture temporal dynamics & Temporal transformer models sequence \\
-Learn implicit constraints & Training on real data learns physics \\
+Forward process & Isotropic Gaussian & Heat equation on $\mathbf{L}$ \\
+Denoiser & MLP message passing & Polynomial filter $H(\mathbf{L})$ \\
+Edge features & Yes (direction vectors) & No (uses $\mathbf{L}^k$) \\
+Parameters & $\sim$1M & $\sim$100K \\
+Interpretability & Black-box MLP & Spectral (graph frequencies) \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\section{Implementation}
+
+\subsection{Data Pipeline}
+\begin{enumerate}
+    \item Load flag simulation data (50 trajectories $\times$ 401 frames)
+    \item Flatten to 20,050 individual frames
+    \item Normalize (zero mean, unit variance)
+    \item Split 90\% train, 10\% validation
+\end{enumerate}
+
+\subsection{Training Configuration}
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Batch size & 32 \\
+Learning rate & $10^{-4}$ \\
+Optimizer & AdamW \\
+Noise steps & 1000 \\
+Schedule & Cosine \\
+Epochs & 100 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Usage}
+\begin{verbatim}
+python setup_flag_data.py      # Download and prepare data
+python train_flag_diffusion.py  # Train model
+\end{verbatim}
 
 \section{Summary}
 
 \begin{enumerate}
-    \item \textbf{Simple approaches failed}: Spectral filtering and small VAEs couldn't capture the full structure of mesh dynamics.
+    \item \textbf{Simple approaches failed}: Spectral filtering and VAEs couldn't capture the full structure of graph signals.
 
-    \item \textbf{Diffusion learns holistically}: By learning to denoise at all noise levels, the model captures spatial coherence, temporal smoothness, and physical constraints implicitly.
+    \item \textbf{Diffusion learns holistically}: By learning to denoise at all noise levels, the model captures spatial coherence and physical constraints implicitly.
 
-    \item \textbf{Augmentation is built-in}: The partial denoising trick provides controllable augmentation without any modification to the model.
+    \item \textbf{Augmentation is built-in}: Partial denoising provides controllable augmentation---start from intermediate noise level to generate similar-but-different signals.
 
-    \item \textbf{GNNs respect structure}: Graph neural networks naturally handle irregular mesh topology.
-\end{enumerate}
-
-\section{Next Steps}
-
-\begin{enumerate}
-    \item Implement the trajectory diffusion model (PyTorch + PyTorch Geometric)
-    \item Train on flag simulation data (DeepMind MeshGraphNets dataset)
-    \item Evaluate generation quality and augmentation effectiveness
-    \item Apply to other mesh simulation domains
+    \item \textbf{Two architectures}:
+    \begin{itemize}
+        \item GNN with edge features: direction-aware, like CNN kernels
+        \item GAD: graph-aware noise via heat equation, polynomial filter denoiser
+    \end{itemize}
 \end{enumerate}
 
 \bibliographystyle{plain}
@@ -257,6 +272,11 @@ Learn implicit constraints & Training on real data learns physics \\
 Ho, J., Jain, A., \& Abbeel, P. (2020).
 Denoising Diffusion Probabilistic Models.
 \textit{NeurIPS}.
+
+\bibitem{gad}
+Rozada, S., et al. (2025).
+Graph-Aware Diffusion for Signal Generation.
+\textit{arXiv:2510.05036}.
 
 \bibitem{meshgraphnets}
 Pfaff, T., Fortunato, M., Sanchez-Gonzalez, A., \& Battaglia, P. W. (2021).
