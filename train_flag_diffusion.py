@@ -100,6 +100,40 @@ def mesh_to_graph(cells, pos):
     return edge_index, edge_attr
 
 
+def compute_laplacian(edge_index, num_nodes, normalize=True):
+    """
+    Compute graph Laplacian matrix from edge index.
+
+    Args:
+        edge_index: (2, E) edges
+        num_nodes: number of vertices
+        normalize: if True, compute normalized Laplacian L = I - D^{-1/2} A D^{-1/2}
+
+    Returns:
+        L: (V, V) Laplacian matrix
+    """
+    # Build adjacency matrix
+    src, dst = edge_index
+    A = torch.zeros(num_nodes, num_nodes)
+    A[src, dst] = 1.0
+
+    # Degree matrix
+    D = A.sum(dim=1)
+
+    if normalize:
+        # Normalized Laplacian: L = I - D^{-1/2} A D^{-1/2}
+        D_inv_sqrt = torch.zeros_like(D)
+        mask = D > 0
+        D_inv_sqrt[mask] = D[mask].pow(-0.5)
+        D_inv_sqrt = torch.diag(D_inv_sqrt)
+        L = torch.eye(num_nodes) - D_inv_sqrt @ A @ D_inv_sqrt
+    else:
+        # Unnormalized Laplacian: L = D - A
+        L = torch.diag(D) - A
+
+    return L
+
+
 # =============================================================================
 # Model Components
 # =============================================================================
@@ -326,6 +360,235 @@ class DiffusionSchedule:
             x = self.p_sample(model, x, n)
 
         return x
+
+
+# =============================================================================
+# GAD-Style Diffusion (Graph-Aware, using Heat Equation)
+# =============================================================================
+
+class GADSchedule:
+    """
+    Graph-Aware Diffusion schedule from arXiv:2510.05036.
+
+    Key difference from standard DDPM:
+    - Forward process uses heat equation on graph Laplacian
+    - Noise spreads along graph edges, not isotropically
+    - Smooth signals (low graph frequency) decay slower
+    """
+
+    def __init__(self, laplacian, num_steps=1000, sigma=1.0, gamma=0.1, device='cpu'):
+        """
+        Args:
+            laplacian: (V, V) graph Laplacian matrix
+            num_steps: number of diffusion steps
+            sigma: noise scale
+            gamma: regularization (L_gamma = L + gamma*I for stability)
+        """
+        self.num_steps = num_steps
+        self.sigma = sigma
+        self.gamma = gamma
+
+        # L_gamma = L + gamma*I (ensures positive eigenvalues)
+        V = laplacian.shape[0]
+        L_gamma = laplacian + gamma * torch.eye(V)
+        self.L_gamma = L_gamma.to(device)
+
+        # Eigendecomposition for efficient computation
+        # L_gamma = U @ diag(eigenvalues) @ U^T
+        eigenvalues, U = torch.linalg.eigh(L_gamma)
+        self.eigenvalues = eigenvalues.to(device)  # (V,)
+        self.U = U.to(device)  # (V, V)
+
+        # Precompute time schedule (FCPS - Floor Constrained Polynomial Schedule)
+        # c_t controls how fast we add noise
+        t = torch.linspace(0, 1, num_steps + 1)
+        # Polynomial schedule: slower at start, faster at end
+        self.c_t = (t ** 2).to(device)  # Simple quadratic, could use FCPS formula
+
+        self.device = device
+
+    def _heat_kernel(self, t_val):
+        """
+        Compute exp(-t * L_gamma) via eigendecomposition.
+
+        This is the heat kernel - it smooths signals along graph edges.
+        """
+        # exp(-t * L_gamma) = U @ diag(exp(-t * eigenvalues)) @ U^T
+        exp_eigenvalues = torch.exp(-t_val * self.eigenvalues)
+        return self.U @ torch.diag(exp_eigenvalues) @ self.U.T
+
+    def q_sample(self, x_0, n, noise=None):
+        """
+        Forward process: add graph-aware noise using heat equation.
+
+        Unlike standard DDPM which adds isotropic noise,
+        GAD adds noise that respects graph structure.
+        """
+        if noise is None:
+            noise = torch.randn_like(x_0)
+
+        # Time value for this step
+        t_val = self.c_t[n].item() if isinstance(n, int) else self.c_t[n]
+
+        # Heat kernel at time t
+        H_t = self._heat_kernel(t_val)  # (V, V)
+
+        # For batched input (B, V, 3)
+        if x_0.dim() == 3:
+            B, V, C = x_0.shape
+            x_t = torch.zeros_like(x_0)
+            for b in range(B):
+                for c in range(C):
+                    # Signal decays via heat equation
+                    signal_part = H_t @ x_0[b, :, c]
+                    # Noise is also filtered (correlated with graph structure)
+                    noise_part = self.sigma * (torch.eye(V, device=self.device) - H_t @ H_t) @ noise[b, :, c]
+                    x_t[b, :, c] = signal_part + noise_part.sqrt().abs() * noise[b, :, c]
+            return x_t
+        else:
+            # Single sample (V, 3)
+            V, C = x_0.shape
+            x_t = torch.zeros_like(x_0)
+            for c in range(C):
+                signal_part = H_t @ x_0[:, c]
+                x_t[:, c] = signal_part + self.sigma * torch.sqrt(1 - torch.exp(-2 * t_val * self.eigenvalues.mean())) * noise[:, c]
+            return x_t
+
+    @torch.no_grad()
+    def p_sample(self, model, x_n, n):
+        """Denoise one step (same as standard DDPM for now)."""
+        n_tensor = torch.full((x_n.shape[0],), n, device=x_n.device, dtype=torch.long)
+        predicted_noise = model(x_n, n_tensor)
+
+        # Simple denoising step
+        # In full GAD, this would use the score function with graph structure
+        step_size = 1.0 / self.num_steps
+        x_prev = x_n - step_size * predicted_noise
+
+        if n > 0:
+            noise = torch.randn_like(x_n)
+            x_prev = x_prev + math.sqrt(step_size) * self.sigma * noise
+
+        return x_prev
+
+    @torch.no_grad()
+    def sample(self, model, shape, device='cuda'):
+        """Generate from pure noise."""
+        x = torch.randn(shape, device=device)
+
+        for n in reversed(range(self.num_steps)):
+            x = self.p_sample(model, x, n)
+            if n % 100 == 0:
+                print(f"  Step {n}...")
+
+        return x
+
+    @torch.no_grad()
+    def augment(self, model, x_seed, start_step=500):
+        """Generate variation using graph-aware noise."""
+        # Add graph-aware noise
+        noise = torch.randn_like(x_seed)
+        x = self.q_sample(x_seed, start_step, noise)
+
+        # Denoise
+        for n in reversed(range(start_step + 1)):
+            x = self.p_sample(model, x, n)
+
+        return x
+
+
+class PolynomialGraphFilter(nn.Module):
+    """
+    Polynomial graph filter from GAD paper.
+
+    H(L) = sum_{k=0}^{K} theta_k * L^k
+
+    This is the denoiser architecture used in GAD.
+    Simpler than message-passing GNN but respects graph structure.
+    """
+
+    def __init__(self, num_nodes, in_channels=3, out_channels=3, K=4, hidden_dim=64):
+        """
+        Args:
+            num_nodes: number of vertices
+            in_channels: input feature dimension (3 for xyz)
+            out_channels: output dimension (3 for xyz noise)
+            K: polynomial order (number of hops)
+            hidden_dim: hidden layer dimension
+        """
+        super().__init__()
+        self.K = K
+        self.num_nodes = num_nodes
+
+        # Learnable polynomial coefficients per layer
+        self.theta = nn.ParameterList([
+            nn.Parameter(torch.randn(K + 1) * 0.01)
+            for _ in range(2)  # 2 layers
+        ])
+
+        # Feature transforms
+        self.input_proj = nn.Linear(in_channels, hidden_dim)
+        self.hidden_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.output_proj = nn.Linear(hidden_dim, out_channels)
+
+        # Timestep embedding
+        self.time_embed = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+        self.hidden_dim = hidden_dim
+        self.L_powers = None  # Precomputed L^k
+
+    def precompute_laplacian_powers(self, L):
+        """Precompute L^0, L^1, ..., L^K for efficiency."""
+        self.L_powers = [torch.eye(L.shape[0], device=L.device)]
+        L_k = L.clone()
+        for k in range(1, self.K + 1):
+            self.L_powers.append(L_k.clone())
+            L_k = L_k @ L
+
+    def graph_filter(self, x, theta):
+        """Apply polynomial graph filter: sum_k theta_k * L^k @ x"""
+        # x: (V, D)
+        out = torch.zeros_like(x)
+        for k, L_k in enumerate(self.L_powers):
+            out = out + theta[k] * (L_k @ x)
+        return out
+
+    def forward(self, x, n, L=None):
+        """
+        x: (B, V, 3) noisy signal
+        n: (B,) noise step
+        L: (V, V) Laplacian (optional, uses precomputed if available)
+        """
+        B, V, C = x.shape
+
+        # Timestep embedding
+        half = self.hidden_dim // 2
+        freqs = torch.exp(-math.log(10000) * torch.arange(half, device=n.device) / half)
+        args = n[:, None].float() * freqs[None, :]
+        t_emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+        t_emb = self.time_embed(t_emb)  # (B, D)
+
+        outputs = []
+        for b in range(B):
+            # Project to hidden dim
+            h = self.input_proj(x[b])  # (V, D)
+
+            # Add timestep
+            h = h + t_emb[b].unsqueeze(0)
+
+            # Apply polynomial graph filters
+            for layer_idx, theta in enumerate(self.theta):
+                h_filtered = self.graph_filter(h, theta)
+                h = F.silu(self.hidden_proj(h_filtered)) if layer_idx == 0 else h_filtered
+
+            out = self.output_proj(h)  # (V, 3)
+            outputs.append(out)
+
+        return torch.stack(outputs)
 
 
 # =============================================================================
