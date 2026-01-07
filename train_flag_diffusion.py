@@ -209,7 +209,7 @@ class TimestepEmbedding(nn.Module):
 class GraphSignalDiffusion(nn.Module):
     """Diffusion model for single-frame graph signals."""
 
-    def __init__(self, cells, mesh_pos, hidden_dim=128, num_layers=4, edge_dim=4):
+    def __init__(self, cells, mesh_pos, hidden_dim=128, num_layers=4, edge_dim=4, batch_size=32):
         super().__init__()
 
         # Precompute graph structure
@@ -219,6 +219,15 @@ class GraphSignalDiffusion(nn.Module):
 
         self.num_vertices = mesh_pos.shape[0]
         self.hidden_dim = hidden_dim
+
+        # Precompute batched edge_index for the expected batch size
+        V = mesh_pos.shape[0]
+        offsets = torch.arange(batch_size) * V
+        edge_index_batched = torch.cat([edge_index + offset for offset in offsets], dim=1)
+        edge_attr_batched = edge_attr.repeat(batch_size, 1)
+        self.register_buffer('edge_index_batched', edge_index_batched)
+        self.register_buffer('edge_attr_batched', edge_attr_batched)
+        self.precomputed_batch_size = batch_size
 
         # Encoder
         self.input_proj = nn.Linear(3, hidden_dim)
@@ -250,13 +259,17 @@ class GraphSignalDiffusion(nn.Module):
         # Batch all nodes together: (B, V, 3) -> (B*V, 3)
         x_flat = x.reshape(B * V, C)
 
-        # Create batched edge_index with node offsets for each sample
-        # This allows processing all batch items in a single GNN pass
-        offsets = torch.arange(B, device=x.device) * V
-        edge_index_b = torch.cat([
-            self.edge_index + offset for offset in offsets
-        ], dim=1)
-        edge_attr_b = self.edge_attr.repeat(B, 1)
+        # Use precomputed batched edge_index if batch size matches
+        if B == self.precomputed_batch_size:
+            edge_index_b = self.edge_index_batched
+            edge_attr_b = self.edge_attr_batched
+        else:
+            # Fall back to dynamic computation for different batch sizes
+            offsets = torch.arange(B, device=x.device) * V
+            edge_index_b = torch.cat([
+                self.edge_index + offset for offset in offsets
+            ], dim=1)
+            edge_attr_b = self.edge_attr.repeat(B, 1)
 
         # Encode (single pass for entire batch)
         h = self.input_proj(x_flat)  # (B*V, D)
@@ -778,13 +791,14 @@ def generate_with_seed(model, schedule, shape, seed, device):
 # Training
 # =============================================================================
 
-def train_epoch(model, dataloader, optimizer, schedule, device, grad_clip=1.0):
+def train_epoch(model, dataloader, optimizer, schedule, device, grad_clip=1.0, scaler=None):
     model.train()
     total_loss = 0
     num_batches = 0
+    use_amp = scaler is not None
 
     for batch in dataloader:
-        batch = batch.to(device)
+        batch = batch.to(device, non_blocking=True)
         B = batch.shape[0]
 
         # Random noise steps
@@ -794,17 +808,26 @@ def train_epoch(model, dataloader, optimizer, schedule, device, grad_clip=1.0):
         noise = torch.randn_like(batch)
         x_n = schedule.q_sample(batch, n, noise)
 
-        # Predict noise
-        predicted = model(x_n, n)
+        optimizer.zero_grad(set_to_none=True)
 
-        # Loss
-        loss = F.mse_loss(predicted, noise)
-
-        optimizer.zero_grad()
-        loss.backward()
-        if grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
+        # Mixed precision forward/backward
+        if use_amp:
+            with torch.amp.autocast('cuda'):
+                predicted = model(x_n, n)
+                loss = F.mse_loss(predicted, noise)
+            scaler.scale(loss).backward()
+            if grad_clip > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            predicted = model(x_n, n)
+            loss = F.mse_loss(predicted, noise)
+            loss.backward()
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
 
         total_loss += loss.item()
         num_batches += 1
@@ -885,8 +908,10 @@ def main():
     train_dataset = FlagFrameDataset(frames[train_idx])
     val_dataset = FlagFrameDataset(frames[val_idx])
 
-    train_loader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True,
+                              num_workers=4, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False,
+                            num_workers=2, pin_memory=True, persistent_workers=True)
 
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
@@ -901,7 +926,13 @@ def main():
         hidden_dim=cfg.hidden_dim,
         num_layers=cfg.num_layers,
         edge_dim=cfg.edge_dim,
+        batch_size=cfg.batch_size,
     ).to(cfg.device)
+
+    # Compile model for faster execution (PyTorch 2.0+)
+    if hasattr(torch, 'compile'):
+        print("  Compiling model with torch.compile()...")
+        model = torch.compile(model)
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"  Parameters: {num_params:,}")
@@ -912,6 +943,11 @@ def main():
     # Training
     print("\nTraining...")
     print("-" * 60)
+
+    # Mixed precision scaler for faster training
+    scaler = torch.amp.GradScaler('cuda') if cfg.device == 'cuda' else None
+    if scaler:
+        print("Using mixed precision (AMP)")
 
     train_losses = []
     val_losses = []
@@ -925,7 +961,7 @@ def main():
     for epoch in range(1, cfg.num_epochs + 1):
         start = time.time()
 
-        train_loss = train_epoch(model, train_loader, optimizer, schedule, cfg.device, cfg.grad_clip)
+        train_loss = train_epoch(model, train_loader, optimizer, schedule, cfg.device, cfg.grad_clip, scaler)
         val_loss = evaluate(model, val_loader, schedule, cfg.device)
 
         train_losses.append(train_loss)
