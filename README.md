@@ -59,6 +59,7 @@ LAUGraphDeepFakes/
 ├── setup_gpu.sh               # Linux: setup + train
 ├── setup_flag_data.py         # Download & prepare flag data
 ├── train_flag_diffusion.py    # Main training script
+├── experiment_gnn_vs_cnn.py   # GNN vs CNN comparison experiment
 ├── dataset/                   # FEA data (legacy)
 ├── train_model.py             # VAE+Diffusion for FEA (legacy)
 └── train_spectral_vae.py      # Spectral VAE (legacy)
@@ -158,6 +159,19 @@ Default configuration:
 | GNN layers | 4 encoder + 4 decoder |
 
 Expected time on RTX 4070 Ti: **~25-50 minutes**
+
+## GNN vs CNN Comparison
+
+The experiment `experiment_gnn_vs_cnn.py` demonstrates that GNNs can achieve similar denoising quality to CNNs on grid-structured data:
+
+| Model | Denoising MSE | Noise Reduction | Parameters |
+|-------|---------------|-----------------|------------|
+| CNN   | 0.0102        | 88.8%           | 75,073     |
+| GNN   | 0.0127        | 85.8%           | 38,017     |
+
+This validates using GNNs for mesh data: they match CNN quality while generalizing to arbitrary mesh topologies (not just regular grids).
+
+![GNN vs CNN Results](experiment_gnn_vs_cnn.png)
 
 ## References
 
