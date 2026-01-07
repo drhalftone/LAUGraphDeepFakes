@@ -217,6 +217,62 @@ Interpretability & Black-box MLP & Spectral (graph frequencies) \\
 \end{tabular}
 \end{center}
 
+\subsection{Spectral Analysis: High-Pass vs Low-Pass}
+
+A key difference between the two approaches lies in how they handle graph frequencies.
+
+\subsubsection{The Graph Laplacian as a High-Pass Filter}
+The Laplacian measures how different each vertex is from its neighbors:
+\begin{equation}
+    (\mathbf{L}\mathbf{x})_i = \sum_{j \in \mathcal{N}(i)} (x_i - x_j)
+\end{equation}
+
+The eigenvalues $\lambda$ of $\mathbf{L}$ correspond to graph frequencies:
+\begin{itemize}
+    \item $\lambda = 0$: constant signal (DC component)
+    \item $\lambda$ small: smooth, slowly-varying signals (low frequency)
+    \item $\lambda$ large: rapidly-varying signals (high frequency)
+\end{itemize}
+
+\subsubsection{GAD's Forward Process Destroys High Frequencies First}
+The heat kernel solution is:
+\begin{equation}
+    \mathbf{x}(t) = \exp(-t\mathbf{L}) \mathbf{x}(0)
+\end{equation}
+
+In the spectral domain, each eigenvalue $\lambda$ is attenuated by $\exp(-t\lambda)$:
+\begin{itemize}
+    \item Small $\lambda$ (low freq): $\exp(-t\lambda) \approx 1$ --- \textbf{preserved}
+    \item Large $\lambda$ (high freq): $\exp(-t\lambda) \approx 0$ --- \textbf{destroyed}
+\end{itemize}
+
+This is inherently a \textbf{low-pass} forward process. By the time $t$ is large (high noise), the high-frequency components are completely gone. The denoiser cannot recover information that has been erased.
+
+\subsubsection{Our Approach Preserves All Frequencies}
+With isotropic Gaussian noise:
+\begin{equation}
+    \mathbf{x}_n = \sqrt{\bar{\alpha}_n} \, \mathbf{x}_0 + \sqrt{1 - \bar{\alpha}_n} \, \boldsymbol{\epsilon}
+\end{equation}
+
+All frequencies are corrupted equally---both low and high frequency components are scaled by $\sqrt{\bar{\alpha}_n}$ and buried under noise. But they are still \textbf{present} in the noisy signal, not destroyed. The denoiser can learn to recover both.
+
+\subsubsection{Implications}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+ & GAD (Heat Equation) & Ours (Isotropic Noise) \\
+\midrule
+Forward process & Low-pass & All-pass \\
+High freq at $n = N$ & Gone (irrecoverable) & Buried but present \\
+Denoiser task & Recover low freq, hallucinate high freq & Recover all freq \\
+Best for & Smooth signals & Signals with fine detail \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For mesh data with sharp features (edges, creases, boundaries), our isotropic approach may be preferable since it doesn't preferentially destroy high-frequency geometric detail.
+
 \section{Implementation}
 
 \subsection{Data Pipeline}
