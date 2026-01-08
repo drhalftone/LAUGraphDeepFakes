@@ -48,6 +48,19 @@ We use DeepMind's flag simulation dataset (MeshGraphNets):
 
 Each frame is treated as an independent graph signal $\mathbf{x} \in \mathbb{R}^{V \times 3}$.
 
+\subsubsection{Custom Simulation (Optional)}
+We also provide a GPU-accelerated cloth simulation (\texttt{simulate\_flag.py}) for generating additional training data:
+\begin{itemize}
+    \item Position-based dynamics with vectorized constraint solving
+    \item Chaotic wind forces with multi-frequency sinusoidal gusts
+    \item Configurable temporal stride (default: 100 steps) ensures statistically independent frames
+    \item Avoids the problem of highly correlated consecutive frames
+\end{itemize}
+
+\begin{verbatim}
+python simulate_flag.py --record --stride 100 --frames 100000
+\end{verbatim}
+
 \section{Methods We Explored (and Why They Failed)}
 
 \subsection{Approach 1: Spectral Noise Filtering}
@@ -178,7 +191,7 @@ Output projection & Linear: $D \to 3$ \\
 \end{tabular}
 \end{center}
 
-Parameters: $\sim$1M. Hidden dimension $D = 128$.
+Parameters: $\sim$534K. Hidden dimension $D = 128$.
 
 \subsection{Approach B: Graph-Aware Diffusion (GAD)}
 
@@ -211,7 +224,7 @@ Aspect & GNN + Edge Features & GAD \\
 Forward process & Isotropic Gaussian & Heat equation on $\mathbf{L}$ \\
 Denoiser & MLP message passing & Polynomial filter $H(\mathbf{L})$ \\
 Edge features & Yes (direction vectors) & No (uses $\mathbf{L}^k$) \\
-Parameters & $\sim$1M & $\sim$100K \\
+Parameters & $\sim$534K & $\sim$100K \\
 Interpretability & Black-box MLP & Spectral (graph frequencies) \\
 \bottomrule
 \end{tabular}
@@ -279,7 +292,7 @@ For mesh data with sharp features (edges, creases, boundaries), our isotropic ap
 \begin{enumerate}
     \item Load flag simulation data (50 trajectories $\times$ 401 frames)
     \item Flatten to 20,050 individual frames
-    \item Normalize (zero mean, unit variance)
+    \item Normalize to $[-1, 1]$ range via min-max scaling (standard for DDPM)
     \item Split 90\% train, 10\% validation
 \end{enumerate}
 
@@ -295,14 +308,19 @@ Optimizer & AdamW \\
 Noise steps & 1000 \\
 Schedule & Cosine \\
 Epochs & 100 \\
+Mixed precision & AMP (on CUDA) \\
+Gradient clipping & 1.0 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
+Mixed precision training via PyTorch AMP (Automatic Mixed Precision) is enabled on CUDA devices for faster training with reduced memory usage.
+
 \subsection{Usage}
 \begin{verbatim}
-python setup_flag_data.py      # Download and prepare data
-python train_flag_diffusion.py  # Train model
+python setup_flag_data.py                          # Download and prepare data
+python simulate_flag.py --record --stride 100      # (Optional) Generate more data
+python train_flag_diffusion.py                     # Train model
 \end{verbatim}
 
 \section{Relationship to Prior Work}
