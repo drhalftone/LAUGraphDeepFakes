@@ -32,3 +32,10 @@ flag_data/*.png
 *.out
 *.toc
 *.synctex.gz
+
+# Flag diffusion outputs
+flag_diffusion_output/
+flag_diffusion_output_backup_*/
+
+# Model checkpoints
+*.pt
