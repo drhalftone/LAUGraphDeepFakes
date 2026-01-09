@@ -6,10 +6,21 @@ Generate synthetic graph signals on meshes using GNN-based diffusion models. Tra
 
 This project trains a diffusion model to generate "deep fake" mesh signals. The approach:
 
-1. **Single-Frame Training**: Treat each simulation frame as an independent graph signal (V vertices × 3 coords)
-2. **GNN Encoder/Decoder**: Message-passing networks with edge features for direction-aware processing
-3. **DDPM Diffusion**: Standard denoising diffusion with cosine noise schedule
-4. **Augmentation**: Generate variations of real signals via partial denoising
+1. **Custom Simulation**: GPU-accelerated cloth simulation generates statistically independent training frames
+2. **Single-Frame Training**: Treat each simulation frame as an independent graph signal (V vertices × 3 coords)
+3. **GNN Encoder/Decoder**: Message-passing networks with edge features for direction-aware processing
+4. **DDPM Diffusion**: Standard denoising diffusion with cosine noise schedule
+5. **Augmentation**: Generate variations of real signals via partial denoising
+
+## Why Custom Simulation?
+
+The original DeepMind dataset contains sequential video frames that are highly correlated (consecutive frames are nearly identical). This causes problems for diffusion model training:
+
+- Two nearly identical frames must map to completely different noise patterns
+- The model struggles to learn a coherent noise→signal mapping
+- Generation from pure noise (step 999) fails to produce useful signals
+
+**Solution**: Generate training data with large temporal stride (e.g., 100 steps between frames) so each training sample is statistically independent.
 
 ## Quick Start
 
@@ -18,7 +29,15 @@ This project trains a diffusion model to generate "deep fake" mesh signals. The 
 ```cmd
 git clone git@github.com:drhalftone/LAUGraphDeepFakes.git
 cd LAUGraphDeepFakes
+
+:: Setup environment
 setup_gpu.bat
+
+:: Generate training data (statistically independent frames)
+run_simulation.bat
+
+:: Train diffusion model
+python train_flag_diffusion.py
 ```
 
 ### Linux (GPU)
@@ -28,16 +47,51 @@ git clone git@github.com:drhalftone/LAUGraphDeepFakes.git
 cd LAUGraphDeepFakes
 chmod +x setup_gpu.sh && ./setup_gpu.sh
 source gdf_env/bin/activate
+
+# Generate training data
+python simulate_flag.py --record --stride 100 --frames 100000
+
+# Train
 python train_flag_diffusion.py
 ```
 
 The setup script:
 - Creates virtual environment `gdf_env`
 - Installs PyTorch with CUDA, torch-geometric, TensorFlow
-- Downloads ~1GB flag simulation data
-- Starts training
+- Downloads ~1GB flag simulation data (mesh only)
 
 Skips any steps already completed (safe to re-run).
+
+## Flag Simulation
+
+GPU-accelerated cloth simulation using position-based dynamics (PyTorch + CUDA).
+
+### Preview Mode
+```bash
+python simulate_flag.py
+```
+Opens interactive 3D visualization of the waving flag.
+
+### Record Training Data
+```bash
+python simulate_flag.py --record --stride 100 --frames 100000
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--record` | False | Enable recording mode |
+| `--stride` | 100 | Save every Nth frame (ensures independence) |
+| `--frames` | 10000 | Total simulation steps |
+| `--output` | flag_data | Output directory |
+
+**Example**: `--stride 100 --frames 100000` produces 1000 independent frames.
+
+### Physics Model
+
+- **Position-Based Dynamics**: Stable constraint solving
+- **Chaotic Wind**: Multi-frequency sinusoidal gusts + random turbulence
+- **Verlet Integration**: Energy-conserving time stepping
+- **GPU Acceleration**: All operations vectorized on CUDA
 
 ## Requirements
 
@@ -49,20 +103,22 @@ Skips any steps already completed (safe to re-run).
 
 ```
 LAUGraphDeepFakes/
-├── flag_data/                  # Flag simulation data (downloaded by setup)
+├── flag_data/                  # Flag simulation data
+│   ├── flag_test.npz          # Original mesh (from DeepMind)
+│   └── flag_simulated.npz     # Generated training data
 ├── flag_diffusion_output/      # Training output (models, visualizations)
 ├── docs/
-│   └── graph_signal_diffusion.md  # Detailed architecture docs (START HERE)
+│   └── graph_signal_diffusion.md  # Detailed architecture docs
 ├── reports/
 │   └── diffusion_for_graph_signals.tex
-├── setup_gpu.bat              # Windows: setup + train (one command)
-├── setup_gpu.sh               # Linux: setup + train
-├── setup_flag_data.py         # Download & prepare flag data
-├── train_flag_diffusion.py    # Main training script
-├── experiment_gnn_vs_cnn.py   # GNN vs CNN comparison experiment
-├── dataset/                   # FEA data (legacy)
-├── train_model.py             # VAE+Diffusion for FEA (legacy)
-└── train_spectral_vae.py      # Spectral VAE (legacy)
+├── simulate_flag.py           # GPU cloth simulation (PyTorch)
+├── train_flag_diffusion.py    # Diffusion model training
+├── setup_gpu.bat              # Windows: environment setup
+├── run_simulation.bat         # Windows: generate training data
+├── setup_gpu.sh               # Linux: environment setup
+├── setup_flag_data.py         # Download mesh data
+├── experiment_gnn_vs_cnn.py   # GNN vs CNN comparison
+└── debug_sim.py               # Simulation debugging utility
 ```
 
 ## Current Approach: Graph Signal Diffusion
