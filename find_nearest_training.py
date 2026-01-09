@@ -109,44 +109,83 @@ def find_nearest_neighbors(generated_meshes, training_frames):
     return indices, distances
 
 
-def plot_comparison(generated, nearest_training, cells, distances, output_path):
+def plot_comparison(generated, nearest_training, cells, distances, output_path, mesh_pos=None):
     """Plot generated vs nearest training side by side."""
     num_samples = len(generated)
 
-    fig = plt.figure(figsize=(20, 6 * ((num_samples + 2) // 3)))
+    # Identify fixed vertex (only vertex 0 is truly fixed in DeepMind flag_simple data)
+    # The dataset has corner attachment, not edge attachment
+    fixed_idx = 0  # Single fixed corner vertex
+
+    # Layout: each row has 2 pairs (generated + nearest), so 4 columns total
+    pairs_per_row = 2
+    num_rows = (num_samples + pairs_per_row - 1) // pairs_per_row
+    num_cols = pairs_per_row * 2  # 2 plots per pair
+
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=(4 * num_cols, 4 * num_rows),
+                             subplot_kw={'projection': '3d'})
+
+    # Ensure axes is 2D array
+    if num_rows == 1:
+        axes = axes.reshape(1, -1)
 
     for i in range(num_samples):
+        row = i // pairs_per_row
+        col_base = (i % pairs_per_row) * 2
+
+        # Set same limits for both
+        all_verts = np.concatenate([generated[i], nearest_training[i]])
+        xlim = (all_verts[:, 0].min(), all_verts[:, 0].max())
+        ylim = (all_verts[:, 1].min(), all_verts[:, 1].max())
+        zlim = (all_verts[:, 2].min(), all_verts[:, 2].max())
+
         # Generated
-        ax1 = fig.add_subplot(num_samples, 2, i * 2 + 1, projection='3d')
+        ax1 = axes[row, col_base]
         triangles = generated[i][cells]
         mesh = Poly3DCollection(triangles, alpha=0.6, facecolor='darkorange',
                                 edgecolor='k', linewidth=0.1)
         ax1.add_collection3d(mesh)
-
-        # Set same limits for both
-        all_verts = np.concatenate([generated[i], nearest_training[i]])
-        for ax in [ax1]:
-            ax.set_xlim(all_verts[:, 0].min(), all_verts[:, 0].max())
-            ax.set_ylim(all_verts[:, 1].min(), all_verts[:, 1].max())
-            ax.set_zlim(all_verts[:, 2].min(), all_verts[:, 2].max())
-
-        ax1.set_title(f'Generated #{i+1}', fontsize=12, fontweight='bold')
+        # Highlight fixed corner vertex
+        fixed_pt = generated[i][fixed_idx]
+        ax1.scatter([fixed_pt[0]], [fixed_pt[1]], [fixed_pt[2]],
+                   c='red', s=100, marker='o', depthshade=False, zorder=10)
+        ax1.set_xlim(xlim)
+        ax1.set_ylim(ylim)
+        ax1.set_zlim(zlim)
+        ax1.set_title(f'Generated #{i+1}', fontsize=10, fontweight='bold')
         ax1.view_init(elev=20, azim=45)
+        ax1.set_xticklabels([])
+        ax1.set_yticklabels([])
+        ax1.set_zticklabels([])
 
         # Nearest training
-        ax2 = fig.add_subplot(num_samples, 2, i * 2 + 2, projection='3d')
+        ax2 = axes[row, col_base + 1]
         triangles = nearest_training[i][cells]
         mesh = Poly3DCollection(triangles, alpha=0.6, facecolor='steelblue',
                                 edgecolor='k', linewidth=0.1)
         ax2.add_collection3d(mesh)
-        ax2.set_xlim(all_verts[:, 0].min(), all_verts[:, 0].max())
-        ax2.set_ylim(all_verts[:, 1].min(), all_verts[:, 1].max())
-        ax2.set_zlim(all_verts[:, 2].min(), all_verts[:, 2].max())
-        ax2.set_title(f'Nearest Training (dist={distances[i]:.2f})', fontsize=12, fontweight='bold')
+        # Highlight fixed corner vertex
+        fixed_pt = nearest_training[i][fixed_idx]
+        ax2.scatter([fixed_pt[0]], [fixed_pt[1]], [fixed_pt[2]],
+                   c='red', s=100, marker='o', depthshade=False, zorder=10)
+        ax2.set_xlim(xlim)
+        ax2.set_ylim(ylim)
+        ax2.set_zlim(zlim)
+        ax2.set_title(f'Nearest (d={distances[i]:.1f})', fontsize=10, fontweight='bold')
         ax2.view_init(elev=20, azim=45)
+        ax2.set_xticklabels([])
+        ax2.set_yticklabels([])
+        ax2.set_zticklabels([])
 
-    plt.suptitle('Generated (Orange) vs Nearest Training Sample (Blue)', fontsize=14, fontweight='bold')
-    plt.tight_layout()
+    # Hide any unused axes
+    for i in range(num_samples, num_rows * pairs_per_row):
+        row = i // pairs_per_row
+        col_base = (i % pairs_per_row) * 2
+        axes[row, col_base].set_visible(False)
+        axes[row, col_base + 1].set_visible(False)
+
+    plt.suptitle('Generated (Orange) vs Nearest Training (Blue) | Fixed corner in red', fontsize=14, fontweight='bold')
+    plt.subplots_adjust(wspace=0.05, hspace=0.15)
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Saved: {output_path}")
@@ -193,7 +232,7 @@ def main():
 
     # Plot comparison
     output_path = Path(args.output)
-    plot_comparison(generated_meshes, nearest_training, cells, distances, output_path)
+    plot_comparison(generated_meshes, nearest_training, cells, distances, output_path, mesh_pos)
 
     # Also compute some statistics
     print("\n" + "=" * 60)

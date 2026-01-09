@@ -550,10 +550,14 @@ def main():
     frames = world_pos.reshape(-1, V, C)
     print(f"  Total frames: {len(frames)}, Vertices: {V}")
 
-    # Split
+    # Split randomly (not sequentially by trajectory)
     n_train = int(0.9 * len(frames))
-    train_dataset = FlagFrameDataset(frames[:n_train])
-    val_dataset = FlagFrameDataset(frames[n_train:])
+    np.random.seed(42)
+    indices = np.random.permutation(len(frames))
+    train_idx = indices[:n_train]
+    val_idx = indices[n_train:]
+    train_dataset = FlagFrameDataset(frames[train_idx])
+    val_dataset = FlagFrameDataset(frames[val_idx])
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               num_workers=0, pin_memory=True)
